@@ -559,6 +559,9 @@ def monitor_positions():
 
         if hold >= MAX_HOLD_SEC:
             paper_close(sym, "Force", px); continue
+        
+        if hold >= 15 and not pos["trail_on"]:
+            paper_close(sym, "ZombieCut", px); continue
 
         if side == "LONG":
             prof_pct = (px - entry) / entry
