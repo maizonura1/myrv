@@ -1,43 +1,12 @@
 """
-Bot Scalping v18 — SIGNAL QUALITY + HOLD TIME FIX
+Bot Scalping v18.1 — HYPER SCALPER MODE
 ====================================================
-ROOT CAUSE dari v17 yang masih loss:
-
-MASALAH #1: SIGNAL KONTRADIKSI LOLOS
-  Log: "EMA_stack↑ | Mom+2.5% | Sell91%"
-  Bot masuk LONG padahal sell pressure 91% → harusnya REJECT
-  Fix: Tambah hard veto — jika buy/sell pressure berlawanan arah kuat → skip
-
-MASALAH #2: MAX_HOLD_SEC = 180s TERLALU PENDEK
-  TP1 butuh +0.80% (ATR×1.2), tapi waktu max 3 menit
-  Coin butuh 5-15 menit untuk gerak segitu di 5m chart
-  Force close = pasti loss karena di-cut sebelum profit
-  Fix: MAX_HOLD_SEC = 600s (10 menit)
-
-MASALAH #3: ENTRY TERLALU BANYAK, KUALITAS RENDAH
-  62 trade/jam = masuk hampir setiap scan
-  Fix: MIN_SCORE dinaikkan ke 55, gap minimum 25
-       Tambah konfirmasi multi-timeframe ringan (15m EMA arah)
-
-MASALAH #4: IC KENA SWING NORMAL
-  WLDUSDT turun 0.436% kena IC 0.40% → rebound setelahnya
-  ATR 5m sering terlalu kecil karena hanya 1 candle noise
-  Fix: IC = ATR × 1.2 (lebih longgar), TP1 = ATR × 2.0
-       R:R tetap terjaga karena TP juga ikut naik
-
-MASALAH #5: BUY PRESSURE FILTER LEMAH
-  Sebelumnya br > 0.65 dapat +15 poin tapi tidak ada VETO
-  Fix: Hard veto rule:
-    - LONG: br (buy ratio) WAJIB > 0.50 (lebih banyak buyer)
-    - SHORT: br WAJIB < 0.50 (lebih banyak seller)
-    Kalau tidak memenuhi → sinyal di-skip total
-
-MASALAH #6: VOLUME RATIO TIDAK CUKUP
-  Sebelumnya vr >= 1.5 dapat +4 poin saja
-  Fix: Wajib vr >= 1.3 untuk entry (ada momentum volume)
-       Kalau volume flat → market tidak bergerak → skip
-
-MODE: SIMULASI — tidak ada order nyata ke Binance
+- SPAM ENTRY AKTIF: Syarat masuk dilonggarkan (Score 40, VR 1.1)
+- MAX POSISI: 3 posisi bersamaan
+- SIZE ORDER: $2 per posisi
+- LIGHTNING CUT: Minus nyentuh 0.15% dari entry langsung buang
+- INSTA-TRAIL: Begitu profit dikit, Trailing Stop langsung 
+  nangkring di atas titik Break-Even (+ fee maker/taker aman).
 """
 
 import os, time, math, threading, queue
@@ -55,82 +24,61 @@ client = Client(os.getenv("API_KEY"), os.getenv("API_SECRET"))
 client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
 
 # ═══════════════════════════════════════════════════════
-#  CONFIG v17
+#  CONFIG v18.1 - HYPER SCALPER MODE
 # ═══════════════════════════════════════════════════════
 LEVERAGE       = 20
-ORDER_USDT     = 1.0
-MAX_POSITIONS  = 3
+ORDER_USDT     = 2.0    # Sesuai request: $2 per posisi
+MAX_POSITIONS  = 3      # Sesuai request: Max 3 posisi berbarengan
+CONTRARIAN     = False  
 
-# ── CONTRARIAN: MATI. Sekarang pakai RSI extreme only ─
-CONTRARIAN     = False   # Full flip dibuang
+# ── ATR-BASED STOPS & TARGETS (SUPER TIGHT) ────────────
+ATR_IC_MULT    = 0.2    # SL sangat tipis
+ATR_TP1_MULT   = 1.0    # TP1 dipercepat
+ATR_TP2_MULT   = 2.5    # TP2 diperpendek biar realistis buat scalping
+ATR_TRAIL_MULT = 0.2    # Jarak trailing super nempel pas udah profit
 
-# ── ATR-BASED STOPS & TARGETS ─────────────────────────
-# v18: IC lebih longgar supaya tidak kena swing normal
-ATR_IC_MULT    = 1.2    # SL = ATR × 1.2 (naik dari 0.8, beri ruang lebih)
-ATR_TP1_MULT   = 2.0    # TP1 = ATR × 2.0 (naik dari 1.2, R:R tetap 1:1.7)
-ATR_TP2_MULT   = 4.0    # TP2 = ATR × 4.0 (naik dari 2.4)
-ATR_TRAIL_MULT = 1.0    # Trail width = ATR × 1.0
+# Hard cap persen (Ini kunci "cut tanpa basa basi")
+MAX_IC_PCT     = 0.0015 # Max minus 0.15% dari entry (Batas minimal nutup fee+spread)
+MAX_TP1_PCT    = 0.006  # TP1 cukup 0.6%
+MAX_TP2_PCT    = 0.015  # TP2 max 1.5%
 
-# Hard cap persen (safety net agar tidak terlalu longgar)
-MAX_IC_PCT     = 0.007  # Max IC 0.7% dari entry (naik dari 0.4%)
-MAX_TP1_PCT    = 0.015  # Max TP1 1.5% (naik dari 0.8%)
-MAX_TP2_PCT    = 0.030  # Max TP2 3.0% (naik dari 2.0%)
+# Trail activation: Aktif gila-gilaan cepat
+TRAIL_ACTIVATE_MULT = 0.15 # Profit lewatin fee dikit, langsung aktifin trail
 
-# Trail activation: profit 1.0× ATR baru trail on
-TRAIL_ACTIVATE_MULT = 1.0
-
-# TP1 partial — tutup 60%, sisakan 40% untuk trail ke TP2
 TP1_RATIO      = 0.60
-
-# ── FILTER BTC DIRECTION ──────────────────────────────
 BTC_FILTER     = True
+ADX_MIN        = 20     
 
-# ── ADX FILTER ────────────────────────────────────────
-ADX_MIN        = 20     # Harus ada trend, bukan noise
-
-# ── VOLUME & PRESSURE VETO ────────────────────────────
-# v18: hard veto kalau pressure berlawanan arah
-MIN_VR         = 1.3    # Minimum volume ratio untuk entry
-# Buy ratio veto: LONG butuh br > 0.48, SHORT butuh br < 0.52
+# ── AGAR BISA SPAM ENTRY ──────────────────────────────
+MIN_VR         = 1.1    # Turunin dikit biar lebih sering masuk
 BR_LONG_MIN    = 0.48
 BR_SHORT_MAX   = 0.52
 
-# Kecepatan
 SCAN_INTERVAL  = 1
 MONITOR_INT    = 0.25
 SCAN_DELAY     = 0.015
 BATCH_SIZE     = 15
 MAX_WORKERS    = 8
-MAX_HOLD_SEC   = 600    # 10 menit — cukup waktu untuk gerak ATR×2.0
+MAX_HOLD_SEC   = 180    # Balikin ke 3 menit, kelamaan hold bahaya buat scalper ketat
 
-# Score threshold — lebih ketat
-MIN_SCORE      = 55     # naik dari 45
-MIN_GAP        = 25     # naik dari 20
-COOLDOWN_SEC   = 8      # naik dari 5
+MIN_SCORE      = 40     # Turunin drastis biar gampang open posisi
+MIN_GAP        = 10     # Jarak skor L/S diturunkan
+COOLDOWN_SEC   = 3      # Spam delay cuma 3 detik antar koin
 
-# Kill switch
 DAILY_LOSS     = -8.0
 CONSEC_MAX     = 6
 CONSEC_PAUSE   = 60
-
-# Cache TTL
 TTL_5M         = 5
 TTL_15M        = 30
 
 # ═══════════════════════════════════════════════════════
-#  SYMBOLS — TOP 30 LIQUID FUTURES ONLY
-#  Kurangi dari 158 → 30: spread bagus, liquidity tebal
+#  SYMBOLS
 # ═══════════════════════════════════════════════════════
 SYMBOLS = [
-    # Mega cap — paling liquid, spread paling kecil
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
     "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "TRXUSDT", "DOTUSDT",
-
-    # Large cap — volume besar, cukup liquid
     "LINKUSDT", "MATICUSDT", "LTCUSDT", "ATOMUSDT", "UNIUSDT",
     "NEARUSDT", "APTUSDT", "ARBUSDT", "OPUSDT", "INJUSDT",
-
-    # Mid cap momentum — pilihan terbaik
     "SUIUSDT", "SEIUSDT", "FETUSDT", "WLDUSDT", "AAVEUSDT",
     "ORDIUSDT", "TONUSDT", "1000PEPEUSDT", "WIFUSDT", "JUPUSDT",
 ]
@@ -222,7 +170,7 @@ def ohlcv(symbol, interval, limit=100):
         return _ohlcv_cache.get(key, (None, None))[1]
 
 # ═══════════════════════════════════════════════════════
-#  TA — tambah ADX
+#  TA 
 # ═══════════════════════════════════════════════════════
 def run_ta(df):
     c, h, l, v = df["close"], df["high"], df["low"], df["volume"]
@@ -234,7 +182,6 @@ def run_ta(df):
     df["e50"]  = ta.trend.EMAIndicator(c, 50).ema_indicator()
     df["atr"]  = ta.volatility.AverageTrueRange(h, l, c, 14).average_true_range()
 
-    # ADX — FIX #7: filter trend strength
     adx_ind    = ta.trend.ADXIndicator(h, l, c, 14)
     df["adx"]  = adx_ind.adx()
 
@@ -254,7 +201,6 @@ def btc_trend():
         if df is None or len(df) < 30:
             return "UNKNOWN"
         df  = run_ta(df.copy())
-        # FIX #4: gunakan candle [-2] yang sudah close
         row = df.iloc[-2]
         p, e5, e9, e21 = row["close"], row["e5"], row["e9"], row["e21"]
         m5 = row["m5"]
@@ -295,20 +241,16 @@ def ks_upd(pnl):
     _ks["consec"] = 0 if pnl >= 0 else _ks["consec"] + 1
 
 # ═══════════════════════════════════════════════════════
-#  ATR LEVELS — FIX #2 & #3
+#  ATR LEVELS
 # ═══════════════════════════════════════════════════════
 def calc_levels(direction, entry, atr):
-    """
-    Hitung IC, TP1, TP2 berdasarkan ATR.
-    Lebih adaptif dari fixed pct — noise tiap coin beda-beda.
-    """
     if direction == "LONG":
         ic      = entry - min(atr * ATR_IC_MULT,   entry * MAX_IC_PCT)
         tp1     = entry + min(atr * ATR_TP1_MULT,  entry * MAX_TP1_PCT)
         tp2     = entry + min(atr * ATR_TP2_MULT,  entry * MAX_TP2_PCT)
         hard_sl = entry - min(atr * ATR_IC_MULT * 1.2, entry * MAX_IC_PCT * 1.2)
         trail0  = entry - min(atr * ATR_TRAIL_MULT, entry * MAX_IC_PCT)
-        trail_a = entry + atr * TRAIL_ACTIVATE_MULT  # aktivasi trail di sini
+        trail_a = entry + atr * TRAIL_ACTIVATE_MULT  
     else:
         ic      = entry + min(atr * ATR_IC_MULT,   entry * MAX_IC_PCT)
         tp1     = entry - min(atr * ATR_TP1_MULT,  entry * MAX_TP1_PCT)
@@ -329,22 +271,12 @@ def calc_levels(direction, entry, atr):
     }
 
 # ═══════════════════════════════════════════════════════
-#  SIGNAL ENGINE v17 — CLOSE CANDLE + ADX + BTC FILTER
+#  SIGNAL ENGINE
 # ═══════════════════════════════════════════════════════
 def signal(df):
-    """
-    v18 — Signal dengan hard veto rules:
-    1. Volume ratio wajib >= MIN_VR
-    2. Buy pressure veto: arah entry HARUS sesuai pressure
-    3. Konfirmasi 15m EMA ringan (ambil dari cache)
-    4. Pakai iloc[-2] (candle close)
-    5. ADX filter
-    6. BTC direction filter
-    """
     if df is None or len(df) < 55:
         return None, 0, [], 0.0
 
-    # FIX #4: candle yang sudah close
     row   = df.iloc[-2]
     prev  = df.iloc[-3]
     prev2 = df.iloc[-4]
@@ -355,26 +287,23 @@ def signal(df):
     mh_p   = prev["mh"]
     mh_p2  = prev2["mh"]
     vr     = row["vr"]
-    br     = row["br"]   # buy ratio: > 0.5 = lebih banyak buyer
+    br     = row["br"]
     m5     = row["m5"]
     body   = row["br2"]
     atr    = row["atr"]
     adx    = row["adx"]
     btc    = _macro["btc"]
 
-    # ═ HARD GATE #1: ADX ══════════════════════════════
     if adx < ADX_MIN:
         return None, 0, [], atr
 
-    # ═ HARD GATE #2: VOLUME ═══════════════════════════
-    # v18: wajib ada momentum volume, bukan market tidur
     if vr < MIN_VR:
         return None, 0, [], atr
 
     lp = sp = 0
     sl = ss = []
 
-    # ═ A. EMA stack ═══════════════════════════════════
+    # EMA
     if p > e5 > e9 > e21 > e50:   lp += 30; sl.append("EMA_stack↑")
     elif p > e5 > e9 > e21:        lp += 22; sl.append("EMA↑↑")
     elif p > e9 > e21:             lp += 14; sl.append("EMA↑")
@@ -385,7 +314,7 @@ def signal(df):
     elif p < e9 < e21:             sp += 14; ss.append("EMA↓")
     elif p < e9:                   sp += 7
 
-    # ═ B. Momentum ════════════════════════════════════
+    # Momentum
     if m5 > 0.005:    lp += 25; sl.append(f"Mom+{m5*100:.1f}%")
     elif m5 > 0.003:  lp += 18; sl.append(f"Mom+{m5*100:.1f}%")
     elif m5 > 0.001:  lp += 10
@@ -396,7 +325,7 @@ def signal(df):
     elif m5 < -0.001: sp += 10
     elif m5 > 0.001:  sp = max(0, sp - 15)
 
-    # ═ C. MACD ════════════════════════════════════════
+    # MACD
     if mh_p <= 0 and mh > 0:           lp += 22; sl.append("MACD_X↑")
     elif mh > 0 and mh > mh_p > mh_p2: lp += 18; sl.append("MACD↑↑")
     elif mh > 0 and mh > mh_p:         lp += 12; sl.append("MACD↑")
@@ -405,15 +334,14 @@ def signal(df):
     elif mh < 0 and mh < mh_p < mh_p2: sp += 18; ss.append("MACD↓↓")
     elif mh < 0 and mh < mh_p:         sp += 12; ss.append("MACD↓")
 
-    # ═ D. Volume bonus (sudah lewat gate >= 1.3) ═════
+    # Volume
     if vr >= 3.0:
         lp += 15; sp += 15
         sl.append(f"Vol{vr:.1f}x"); ss.append(f"Vol{vr:.1f}x")
     elif vr >= 2.0: lp += 10; sp += 10; sl.append(f"Vol{vr:.1f}x"); ss.append(f"Vol{vr:.1f}x")
     elif vr >= 1.5: lp += 6;  sp += 6
 
-    # ═ E. Buy/Sell pressure ═══════════════════════════
-    # Scoring biasa dulu
+    # Pressure
     if br > 0.65:    lp += 18; sl.append(f"Buy{br:.0%}")
     elif br > 0.57:  lp += 10
     elif br < 0.43:  lp = max(0, lp - 15)
@@ -422,7 +350,7 @@ def signal(df):
     elif br < 0.43:  sp += 10
     elif br > 0.57:  sp = max(0, sp - 15)
 
-    # ═ F. RSI ═════════════════════════════════════════
+    # RSI
     if rsi > 75:
         lp  = int(lp * 0.4)
         sp += 20; ss.append(f"RSI_OB{rsi:.0f}")
@@ -434,15 +362,15 @@ def signal(df):
     elif 35 < rsi < 55 and m5 < 0:
         sp += 6
 
-    # ═ G. Candle body ═════════════════════════════════
+    # Candle
     if row["close"] > row["open"] and body > 0.6: lp += 6
     if row["close"] < row["open"] and body > 0.6: sp += 6
 
-    # ═ H. ADX bonus ═══════════════════════════════════
+    # ADX
     if adx > 35: lp += 8; sp += 8; sl.append(f"ADX{adx:.0f}"); ss.append(f"ADX{adx:.0f}")
     elif adx > 25: lp += 4; sp += 4
 
-    # ═ I. BTC direction filter ════════════════════════
+    # BTC Filter
     if btc == "BULL":
         lp += 15
         if BTC_FILTER: sp = 0; ss = []
@@ -460,24 +388,19 @@ def signal(df):
         if BTC_FILTER: lp = max(0, lp - 30)
         else: lp = max(0, lp - 15)
 
-    # ═ DECISION ═══════════════════════════════════════
     btc_sw = btc in ("SIDEWAYS", "UNKNOWN")
-    thresh = 60 if btc_sw else MIN_SCORE
+    thresh = 40 if btc_sw else MIN_SCORE
     gap    = abs(lp - sp)
 
     if lp <= sp or lp < thresh or gap < MIN_GAP:
         if sp <= lp or sp < thresh or gap < MIN_GAP:
             return None, max(lp, sp), [], atr
-        # SHORT path — veto check dulu
-        # v18 HARD VETO: SHORT butuh br < BR_SHORT_MAX
         if br >= BR_SHORT_MAX:
-            return None, sp, [], atr  # pressure tidak mendukung SHORT
+            return None, sp, [], atr  
         return "SHORT", sp, ss[:3], atr
 
-    # LONG path — veto check
-    # v18 HARD VETO: LONG butuh br > BR_LONG_MIN
     if br <= BR_LONG_MIN:
-        return None, lp, [], atr  # pressure tidak mendukung LONG
+        return None, lp, [], atr  
 
     return "LONG", lp, sl[:3], atr
 
@@ -593,12 +516,12 @@ def paper_tp1(sym, price):
     pos["qty_rem"] = pos["qty"] * (1 - TP1_RATIO)
     pos["be_on"]   = True
 
-    # Setelah TP1, SL ke breakeven, trail ketat
+    # Trail super ketat setelah TP1
     if side == "LONG":
-        pos["hard_sl"]  = entry * 1.00005
+        pos["hard_sl"]  = entry * 1.0006
         pos["trail_sl"] = price - atr * ATR_TRAIL_MULT * 0.7
     else:
-        pos["hard_sl"]  = entry * 0.99995
+        pos["hard_sl"]  = entry * 0.9994
         pos["trail_sl"] = price + atr * ATR_TRAIL_MULT * 0.7
     pos["peak"]     = price
     pos["trail_on"] = True
@@ -617,7 +540,7 @@ def paper_tp1(sym, price):
     print_inline()
 
 # ═══════════════════════════════════════════════════════
-#  MONITOR
+#  MONITOR - LOGIKA TRAILING AGRESIF BARU
 # ═══════════════════════════════════════════════════════
 def monitor_positions():
     for sym in list(paper_positions.keys()):
@@ -649,23 +572,21 @@ def monitor_positions():
             if not pos["tp1_hit"] and px >= pos["tp1"]:
                 paper_tp1(sym, px); continue
 
-            # Trail activation: profit ≥ 0.5× ATR
+            # Trail activation: Langsung pindah SL ke Break Even + Fee
             if px >= pos["trail_act"] and not pos["trail_on"]:
                 pos["trail_on"] = True
                 pos["peak"]     = px
-                pos["trail_sl"] = px - atr * ATR_TRAIL_MULT
-                pos["hard_sl"]  = entry * 1.00005
+                pos["trail_sl"] = entry * 1.0006 
+                pos["hard_sl"]  = entry * 1.0006
 
             if pos["trail_on"] and px > pos["peak"]:
                 pos["peak"]     = px
                 new_t           = px - atr * ATR_TRAIL_MULT
-                pos["trail_sl"] = max(pos["trail_sl"], new_t)
-                new_hard        = px - atr * ATR_TRAIL_MULT * 1.5
-                pos["hard_sl"]  = max(pos["hard_sl"], new_hard)
+                # Jangan biarkan trail SL turun di bawah garis Break Even
+                pos["trail_sl"] = max(pos["trail_sl"], new_t, entry * 1.0006)
 
             if pos["trail_on"] and px <= pos["trail_sl"]:
-                tag = "TrailBE" if pos["be_on"] else "TrailStop"
-                paper_close(sym, tag, px); continue
+                paper_close(sym, "TrailStop", px); continue
 
             if pos["tp1_hit"] and px >= pos["tp2"]:
                 paper_close(sym, "TP2", px); continue
@@ -687,22 +608,21 @@ def monitor_positions():
             if not pos["tp1_hit"] and px <= pos["tp1"]:
                 paper_tp1(sym, px); continue
 
+            # Trail activation: Langsung pindah SL ke Break Even + Fee
             if px <= pos["trail_act"] and not pos["trail_on"]:
                 pos["trail_on"] = True
                 pos["peak"]     = px
-                pos["trail_sl"] = px + atr * ATR_TRAIL_MULT
-                pos["hard_sl"]  = entry * 0.99995
+                pos["trail_sl"] = entry * 0.9994 
+                pos["hard_sl"]  = entry * 0.9994
 
             if pos["trail_on"] and px < pos["peak"]:
                 pos["peak"]     = px
                 new_t           = px + atr * ATR_TRAIL_MULT
-                pos["trail_sl"] = min(pos["trail_sl"], new_t)
-                new_hard        = px + atr * ATR_TRAIL_MULT * 1.5
-                pos["hard_sl"]  = min(pos["hard_sl"], new_hard)
+                # Jangan biarkan trail SL naik di atas garis Break Even
+                pos["trail_sl"] = min(pos["trail_sl"], new_t, entry * 0.9994)
 
             if pos["trail_on"] and px >= pos["trail_sl"]:
-                tag = "TrailBE" if pos["be_on"] else "TrailStop"
-                paper_close(sym, tag, px); continue
+                paper_close(sym, "TrailStop", px); continue
 
             if pos["tp1_hit"] and px <= pos["tp2"]:
                 paper_close(sym, "TP2", px); continue
@@ -726,7 +646,6 @@ def scan_one(sym):
         if df is None or len(df) < 55: return None
         df = run_ta(df.copy())
 
-        # FIX #4: cek price dari candle[-2] yang sudah close
         px  = df["close"].iloc[-2]
         atr = df["atr"].iloc[-2]
         if px == 0 or atr / px > 0.03: return None
@@ -734,7 +653,6 @@ def scan_one(sym):
         dir_, sc, sigs, atr_val = signal(df)
         if dir_ is None or len(sigs) < 1: return None
 
-        # Gunakan price live untuk entry actual (tapi signal dari candle closed)
         px_live = price_live(sym)
         if px_live == 0: return None
 
@@ -776,7 +694,7 @@ def print_inline():
     wr  = _stats["wins"] / n * 100 if n else 0
     pnl = _stats["pnl"]
     e   = "💚" if pnl >= 0 else "🔴"
-    print(f"     ┌ [v18] {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']} {e}PnL:{pnl:+.4f}U")
+    print(f"     ┌ [v18.1] {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']} {e}PnL:{pnl:+.4f}U")
     print(f"     └ ATR-SL | TP1:{_stats['tp1']} TP2:{_stats['tp2']} "
           f"Cut:{_stats['cut']} Guard:{_stats['guard']} Force:{_stats['force']}")
 
@@ -799,7 +717,7 @@ def print_full():
         md = float(np.min(eq - np.maximum.accumulate(eq)))
 
     print(f"\n  {'─'*62}")
-    print(f"  🧪 PAPER v18 [SIGNAL QUALITY + HOLD FIX] — {sess*60:.0f}m | {tph:.1f}T/jam | {len(SYMBOLS)}sym")
+    print(f"  🧪 PAPER v18.1 [HYPER SCALPER MODE] — {sess*60:.0f}m | {tph:.1f}T/jam | {len(SYMBOLS)}sym")
     print(f"  🎯 {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']}")
     print(f"  {e} PnL:{pnl:+.5f}U Best:{_stats['best']:+.5f} Worst:{_stats['worst']:+.5f}")
     print(f"  📐 Sharpe:{sh:.2f} MaxDD:{md:.5f}U")
@@ -862,17 +780,13 @@ def t_macro():
 # ═══════════════════════════════════════════════════════
 def run_bot():
     print("╔═══════════════════════════════════════════════════════╗")
-    print("║  🧪 PAPER TRADE v18 — SIGNAL QUALITY + HOLD FIX     ║")
-    print("║  ⚠️  SIMULASI — NO REAL ORDERS TO BINANCE             ║")
+    print("║  🧪 PAPER TRADE v18.1 — HYPER SCALPER MODE          ║")
+    print("║  ⚠️  SIMULASI — NO REAL ORDERS TO BINANCE           ║")
     print("╠═══════════════════════════════════════════════════════╣")
-    print(f"║  Fix: Hard veto pressure berlawanan arah             ║")
-    print(f"║  Fix: Volume wajib >= {MIN_VR}x sebelum entry               ║")
-    print(f"║  Fix: MAX_HOLD = {MAX_HOLD_SEC}s (dari 180s)                  ║")
-    print(f"║  Fix: IC=ATR×{ATR_IC_MULT} TP1=ATR×{ATR_TP1_MULT} TP2=ATR×{ATR_TP2_MULT}              ║")
-    print(f"║  Fix: MIN_SCORE={MIN_SCORE} MIN_GAP={MIN_GAP} COOLDOWN={COOLDOWN_SEC}s               ║")
+    print(f"║  Spam Entry: VR≥{MIN_VR} Score≥{MIN_SCORE}                            ║")
+    print(f"║  Cut Cepat : 0.15% drawdown langsung buang            ║")
+    print(f"║  Auto BE   : Trailing ngunci di atas harga entry      ║")
     print("╚═══════════════════════════════════════════════════════╝")
-    print(f"\n  ATR multipliers: IC×{ATR_IC_MULT} | TP1×{ATR_TP1_MULT} | TP2×{ATR_TP2_MULT} | Trail×{ATR_TRAIL_MULT}")
-    print(f"  Max caps: IC<{MAX_IC_PCT*100:.1f}% | TP1<{MAX_TP1_PCT*100:.1f}% | TP2<{MAX_TP2_PCT*100:.1f}%")
 
     try:
         valid = {s["symbol"] for s in client.futures_exchange_info()["symbols"]
