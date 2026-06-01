@@ -1,12 +1,11 @@
 """
-Bot Scalping v18.1 — HYPER SCALPER MODE
+Bot Scalping v18.2 — IMPATIENT HFT MODE
 ====================================================
-- SPAM ENTRY AKTIF: Syarat masuk dilonggarkan (Score 40, VR 1.1)
-- MAX POSISI: 3 posisi bersamaan
-- SIZE ORDER: $2 per posisi
-- LIGHTNING CUT: Minus nyentuh 0.15% dari entry langsung buang
-- INSTA-TRAIL: Begitu profit dikit, Trailing Stop langsung 
-  nangkring di atas titik Break-Even (+ fee maker/taker aman).
+- SPAM ENTRY: Syarat masuk dilonggarkan (Score 40, VR 1.1)
+- VOLUME GAJAH: Hanya entry di koin dengan volume harian > $25 Juta
+- LIGHTNING CUT: Minus 0.05% langsung buang!
+- IMPATIENT CUT: Posisi di-hold 5 detik dan masih minus? TEBAS!
+- INSTA-TRAIL: Profit lewatin fee, TS langsung kunci di Break-Even.
 """
 
 import os, time, math, threading, queue
@@ -24,33 +23,34 @@ client = Client(os.getenv("API_KEY"), os.getenv("API_SECRET"))
 client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
 
 # ═══════════════════════════════════════════════════════
-#  CONFIG v18.1 - HYPER SCALPER MODE
+#  CONFIG v18.2 - IMPATIENT HFT MODE
 # ═══════════════════════════════════════════════════════
 LEVERAGE       = 20
-ORDER_USDT     = 2.0    # Sesuai request: $2 per posisi
-MAX_POSITIONS  = 3      # Sesuai request: Max 3 posisi berbarengan
+ORDER_USDT     = 2.0    # $2 per posisi
+MAX_POSITIONS  = 3      # Max 3 posisi berbarengan
 CONTRARIAN     = False  
 
 # ── ATR-BASED STOPS & TARGETS (SUPER TIGHT) ────────────
-ATR_IC_MULT    = 0.2    # SL sangat tipis
-ATR_TP1_MULT   = 1.0    # TP1 dipercepat
-ATR_TP2_MULT   = 2.5    # TP2 diperpendek biar realistis buat scalping
-ATR_TRAIL_MULT = 0.2    # Jarak trailing super nempel pas udah profit
+ATR_IC_MULT    = 0.2    
+ATR_TP1_MULT   = 1.0    
+ATR_TP2_MULT   = 2.5    
+ATR_TRAIL_MULT = 0.2    
 
 # Hard cap persen (Ini kunci "cut tanpa basa basi")
-MAX_IC_PCT     = 0.0015 # Max minus 0.15% dari entry (Batas minimal nutup fee+spread)
+MAX_IC_PCT     = 0.0005 # Max minus 0.05% langsung cut!
 MAX_TP1_PCT    = 0.006  # TP1 cukup 0.6%
-MAX_TP2_PCT    = 0.015  # TP2 max 1.5%
+MAX_TP2_PCT    = 0.015  
 
 # Trail activation: Aktif gila-gilaan cepat
-TRAIL_ACTIVATE_MULT = 0.15 # Profit lewatin fee dikit, langsung aktifin trail
+TRAIL_ACTIVATE_MULT = 0.15 # Profit dikit langsung trail
 
 TP1_RATIO      = 0.60
 BTC_FILTER     = True
 ADX_MIN        = 20     
 
-# ── AGAR BISA SPAM ENTRY ──────────────────────────────
-MIN_VR         = 1.1    # Turunin dikit biar lebih sering masuk
+# ── AGAR BISA SPAM ENTRY (TAPI BERKUALITAS) ───────────
+MIN_BASE_VOL   = 25_000_000 # MINIMAL VOLUME $25 JUTA
+MIN_VR         = 1.1    
 BR_LONG_MIN    = 0.48
 BR_SHORT_MAX   = 0.52
 
@@ -59,11 +59,11 @@ MONITOR_INT    = 0.25
 SCAN_DELAY     = 0.015
 BATCH_SIZE     = 15
 MAX_WORKERS    = 8
-MAX_HOLD_SEC   = 180    # Balikin ke 3 menit, kelamaan hold bahaya buat scalper ketat
+MAX_HOLD_SEC   = 180    
 
-MIN_SCORE      = 40     # Turunin drastis biar gampang open posisi
-MIN_GAP        = 10     # Jarak skor L/S diturunkan
-COOLDOWN_SEC   = 3      # Spam delay cuma 3 detik antar koin
+MIN_SCORE      = 40     # Skor entry rendah biar gampang masuk
+MIN_GAP        = 10     
+COOLDOWN_SEC   = 3      # Spam delay cuma 3 detik
 
 DAILY_LOSS     = -8.0
 CONSEC_MAX     = 6
@@ -540,7 +540,7 @@ def paper_tp1(sym, price):
     print_inline()
 
 # ═══════════════════════════════════════════════════════
-#  MONITOR - LOGIKA TRAILING AGRESIF BARU
+#  MONITOR - IMPATIENT HFT LOGIC
 # ═══════════════════════════════════════════════════════
 def monitor_positions():
     for sym in list(paper_positions.keys()):
@@ -562,6 +562,10 @@ def monitor_positions():
 
         if side == "LONG":
             prof_pct = (px - entry) / entry
+
+            # 🚨 ATURAN BARU: Kalau nyangkut lebih dari 5 detik dan masih minus, TEBAS!
+            if hold >= 5 and prof_pct < 0:
+                paper_close(sym, "ImpatientCut", px); continue
 
             if px <= pos["ic"]:
                 paper_close(sym, "LightningCut", px); continue
@@ -598,6 +602,10 @@ def monitor_positions():
 
         else:  # SHORT
             prof_pct = (entry - px) / entry
+
+            # 🚨 ATURAN BARU: Kalau nyangkut lebih dari 5 detik dan masih minus, TEBAS!
+            if hold >= 5 and prof_pct < 0:
+                paper_close(sym, "ImpatientCut", px); continue
 
             if px >= pos["ic"]:
                 paper_close(sym, "LightningCut", px); continue
@@ -640,7 +648,7 @@ def scan_one(sym):
         time.sleep(SCAN_DELAY)
         if not ok_cooldown(sym): return None
         tk = _ticker_cache
-        if sym in tk and tk[sym]["vol"] < 200_000: return None
+        if sym in tk and tk[sym]["vol"] < MIN_BASE_VOL: return None
 
         df = ohlcv(sym, Client.KLINE_INTERVAL_5MINUTE, 100)
         if df is None or len(df) < 55: return None
@@ -682,7 +690,7 @@ def top_movers(syms, n=20):
     tk  = tickers_all()
     ss  = set(syms)
     mv  = [(s, abs(d["pct"])) for s, d in tk.items()
-           if s in ss and d["vol"] >= 200_000]
+           if s in ss and d["vol"] >= MIN_BASE_VOL]
     mv.sort(key=lambda x: x[1], reverse=True)
     return [s for s, _ in mv[:n]]
 
@@ -694,7 +702,7 @@ def print_inline():
     wr  = _stats["wins"] / n * 100 if n else 0
     pnl = _stats["pnl"]
     e   = "💚" if pnl >= 0 else "🔴"
-    print(f"     ┌ [v18.1] {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']} {e}PnL:{pnl:+.4f}U")
+    print(f"     ┌ [v18.2] {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']} {e}PnL:{pnl:+.4f}U")
     print(f"     └ ATR-SL | TP1:{_stats['tp1']} TP2:{_stats['tp2']} "
           f"Cut:{_stats['cut']} Guard:{_stats['guard']} Force:{_stats['force']}")
 
@@ -717,7 +725,7 @@ def print_full():
         md = float(np.min(eq - np.maximum.accumulate(eq)))
 
     print(f"\n  {'─'*62}")
-    print(f"  🧪 PAPER v18.1 [HYPER SCALPER MODE] — {sess*60:.0f}m | {tph:.1f}T/jam | {len(SYMBOLS)}sym")
+    print(f"  🧪 PAPER v18.2 [IMPATIENT HFT MODE] — {sess*60:.0f}m | {tph:.1f}T/jam | {len(SYMBOLS)}sym")
     print(f"  🎯 {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']}")
     print(f"  {e} PnL:{pnl:+.5f}U Best:{_stats['best']:+.5f} Worst:{_stats['worst']:+.5f}")
     print(f"  📐 Sharpe:{sh:.2f} MaxDD:{md:.5f}U")
@@ -780,12 +788,13 @@ def t_macro():
 # ═══════════════════════════════════════════════════════
 def run_bot():
     print("╔═══════════════════════════════════════════════════════╗")
-    print("║  🧪 PAPER TRADE v18.1 — HYPER SCALPER MODE          ║")
+    print("║  🧪 PAPER TRADE v18.2 — IMPATIENT HFT MODE          ║")
     print("║  ⚠️  SIMULASI — NO REAL ORDERS TO BINANCE           ║")
     print("╠═══════════════════════════════════════════════════════╣")
-    print(f"║  Spam Entry: VR≥{MIN_VR} Score≥{MIN_SCORE}                            ║")
-    print(f"║  Cut Cepat : 0.15% drawdown langsung buang            ║")
-    print(f"║  Auto BE   : Trailing ngunci di atas harga entry      ║")
+    print(f"║  Volume Filter: > ${MIN_BASE_VOL:,}                        ║")
+    print(f"║  Lightning Cut: 0.05% drawdown langsung buang         ║")
+    print(f"║  Impatient Cut: Hold 5s & Minus? Langsung tebas       ║")
+    print(f"║  Spam Entry   : VR≥{MIN_VR} Score≥{MIN_SCORE}                         ║")
     print("╚═══════════════════════════════════════════════════════╝")
 
     try:
@@ -829,7 +838,7 @@ def run_bot():
             scan_idx = (scan_idx + 1) % n_bat
             scan_list = mv[:15] + reg[:10]
 
-            print(f"  🔍 {len(scan_list)} syms | {slots} slot kosong | ADX≥{ADX_MIN} VR≥{MIN_VR} required")
+            print(f"  🔍 {len(scan_list)} syms | {slots} slot kosong | ADX≥{ADX_MIN} VR≥{MIN_VR} req")
             try: res = scan_batch(scan_list)
             except: res = []
 
@@ -852,7 +861,7 @@ def run_bot():
                     print(f"     ⭐ best: {sym} {d} Score:{sc}")
                     paper_open(sym, d, sc, sg, px, atr)
                 else:
-                    print("  ⏳ Market flat / ADX rendah — tunggu...")
+                    print("  ⏳ Market flat / volume kurang — tunggu...")
             else:
                 print(f"  ⏳ {len(paper_positions)} pos aktif")
         else:
