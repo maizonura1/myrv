@@ -563,12 +563,14 @@ def monitor_positions():
         if side == "LONG":
             prof_pct = (px - entry) / entry
 
-            # 🚨 ATURAN BARU: Kalau nyangkut lebih dari 5 detik dan masih minus, TEBAS!
-            if hold >= 5 and prof_pct < 0:
-                paper_close(sym, "ImpatientCut", px); continue
+            # 🚨 EXTREME LIGHTNING CUT: Merah 1 tick = TEBAS! 🚨
+            # Harga turun sedikit saja di bawah harga entry, langsung buang.
+            if px < entry:
+                paper_close(sym, "ExtremeCut", px); continue
 
-            if px <= pos["ic"]:
-                paper_close(sym, "LightningCut", px); continue
+            # Aturan Impatient Cut (5 detik) tetep ada buat jaga-jaga kalau harganya diam/stuck persis di harga entry (nggak plus nggak minus)
+            if hold >= 5 and px <= entry:
+                paper_close(sym, "ImpatientCut", px); continue
 
             if not pos["tp1_hit"] and px <= pos["hard_sl"]:
                 paper_close(sym, "HardGuard", px); continue
@@ -576,7 +578,7 @@ def monitor_positions():
             if not pos["tp1_hit"] and px >= pos["tp1"]:
                 paper_tp1(sym, px); continue
 
-            # Trail activation: Langsung pindah SL ke Break Even + Fee
+            # Trail activation
             if px >= pos["trail_act"] and not pos["trail_on"]:
                 pos["trail_on"] = True
                 pos["peak"]     = px
@@ -586,7 +588,6 @@ def monitor_positions():
             if pos["trail_on"] and px > pos["peak"]:
                 pos["peak"]     = px
                 new_t           = px - atr * ATR_TRAIL_MULT
-                # Jangan biarkan trail SL turun di bawah garis Break Even
                 pos["trail_sl"] = max(pos["trail_sl"], new_t, entry * 1.0006)
 
             if pos["trail_on"] and px <= pos["trail_sl"]:
@@ -596,19 +597,21 @@ def monitor_positions():
                 paper_close(sym, "TP2", px); continue
 
             pnl_now = (px - entry) * pos.get("qty_rem", pos["qty"])
-            tsl = f"T:{pos['trail_sl']:.5g}" if pos["trail_on"] else f"IC:{pos['ic']:.5g}"
+            tsl = f"T:{pos['trail_sl']:.5g}" if pos["trail_on"] else f"IC:EXTREME"
             tp  = f"TP2:{pos['tp2']:.5g}" if pos["tp1_hit"] else f"TP1:{pos['tp1']:.5g}"
             print(f"  📌 {sym} L@{entry:.5g}→{px:.5g}({prof_pct*100:+.2f}%) {pnl_now:+.4f}U {hold:.0f}s {tsl} {tp}")
 
         else:  # SHORT
             prof_pct = (entry - px) / entry
 
-            # 🚨 ATURAN BARU: Kalau nyangkut lebih dari 5 detik dan masih minus, TEBAS!
-            if hold >= 5 and prof_pct < 0:
-                paper_close(sym, "ImpatientCut", px); continue
+            # 🚨 EXTREME LIGHTNING CUT: Merah 1 tick = TEBAS! 🚨
+            # Harga naik sedikit saja di atas harga entry, langsung buang.
+            if px > entry:
+                paper_close(sym, "ExtremeCut", px); continue
 
-            if px >= pos["ic"]:
-                paper_close(sym, "LightningCut", px); continue
+            # Aturan Impatient Cut (5 detik) kalau harga stuck
+            if hold >= 5 and px >= entry:
+                paper_close(sym, "ImpatientCut", px); continue
 
             if not pos["tp1_hit"] and px >= pos["hard_sl"]:
                 paper_close(sym, "HardGuard", px); continue
@@ -616,7 +619,7 @@ def monitor_positions():
             if not pos["tp1_hit"] and px <= pos["tp1"]:
                 paper_tp1(sym, px); continue
 
-            # Trail activation: Langsung pindah SL ke Break Even + Fee
+            # Trail activation
             if px <= pos["trail_act"] and not pos["trail_on"]:
                 pos["trail_on"] = True
                 pos["peak"]     = px
@@ -626,7 +629,6 @@ def monitor_positions():
             if pos["trail_on"] and px < pos["peak"]:
                 pos["peak"]     = px
                 new_t           = px + atr * ATR_TRAIL_MULT
-                # Jangan biarkan trail SL naik di atas garis Break Even
                 pos["trail_sl"] = min(pos["trail_sl"], new_t, entry * 0.9994)
 
             if pos["trail_on"] and px >= pos["trail_sl"]:
@@ -636,7 +638,7 @@ def monitor_positions():
                 paper_close(sym, "TP2", px); continue
 
             pnl_now = (entry - px) * pos.get("qty_rem", pos["qty"])
-            tsl = f"T:{pos['trail_sl']:.5g}" if pos["trail_on"] else f"IC:{pos['ic']:.5g}"
+            tsl = f"T:{pos['trail_sl']:.5g}" if pos["trail_on"] else f"IC:EXTREME"
             tp  = f"TP2:{pos['tp2']:.5g}" if pos["tp1_hit"] else f"TP1:{pos['tp1']:.5g}"
             print(f"  📌 {sym} S@{entry:.5g}→{px:.5g}({prof_pct*100:+.2f}%) {pnl_now:+.4f}U {hold:.0f}s {tsl} {tp}")
 
