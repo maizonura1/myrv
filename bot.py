@@ -66,8 +66,8 @@ MIN_GAP        = 10
 COOLDOWN_SEC   = 3      # Spam delay cuma 3 detik
 
 DAILY_LOSS     = -8.0
-CONSEC_MAX     = 6
-CONSEC_PAUSE   = 60
+CONSEC_MAX     = 20
+CONSEC_PAUSE   = 30
 TTL_5M         = 5
 TTL_15M        = 30
 
@@ -557,22 +557,21 @@ def monitor_positions():
         atr   = pos["atr"]
         hold  = time.time() - pos["open_time"]
 
-        if hold >= MAX_HOLD_SEC:
-            paper_close(sym, "Force", px); continue
-        
-        if hold >= 15 and not pos["trail_on"]:
+        # 🚨 ZOMBIE CUT DIPERBAIKI: Kasih waktu 60 detik!
+        # Kalau udah 60 detik nahan posisi tapi Trailing Stop belum aktif juga, baru tebas. 
+        # Jangan potong koin yang lagi proses naik di 15 detik pertama!
+        if hold >= 60 and not pos["trail_on"]:
             paper_close(sym, "ZombieCut", px); continue
 
         if side == "LONG":
             prof_pct = (px - entry) / entry
 
-            # 🚨 EXTREME LIGHTNING CUT: Merah 1 tick = TEBAS! 🚨
-            # Harga turun sedikit saja di bawah harga entry, langsung buang.
+            # 🚨 EXTREME LIGHTNING CUT: Merah 1 tick dari entry = TEBAS! 🚨
             if px < entry:
                 paper_close(sym, "ExtremeCut", px); continue
 
-            # Aturan Impatient Cut (5 detik) tetep ada buat jaga-jaga kalau harganya diam/stuck persis di harga entry (nggak plus nggak minus)
-            if hold >= 5 and px <= entry:
+            # 🚨 IMPATIENT CUT: Harga stuck/diem persis di titik entry selama 10 detik = TEBAS!
+            if hold >= 10 and px == entry:
                 paper_close(sym, "ImpatientCut", px); continue
 
             if not pos["tp1_hit"] and px <= pos["hard_sl"]:
@@ -607,13 +606,12 @@ def monitor_positions():
         else:  # SHORT
             prof_pct = (entry - px) / entry
 
-            # 🚨 EXTREME LIGHTNING CUT: Merah 1 tick = TEBAS! 🚨
-            # Harga naik sedikit saja di atas harga entry, langsung buang.
+            # 🚨 EXTREME LIGHTNING CUT: Merah 1 tick dari entry = TEBAS! 🚨
             if px > entry:
                 paper_close(sym, "ExtremeCut", px); continue
 
-            # Aturan Impatient Cut (5 detik) kalau harga stuck
-            if hold >= 5 and px >= entry:
+            # 🚨 IMPATIENT CUT: Harga stuck/diem persis di titik entry selama 10 detik = TEBAS!
+            if hold >= 10 and px == entry:
                 paper_close(sym, "ImpatientCut", px); continue
 
             if not pos["tp1_hit"] and px >= pos["hard_sl"]:
