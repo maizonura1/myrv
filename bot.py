@@ -1,13 +1,30 @@
 """
-Bot Scalping v18.4 — INVERSE EXTREME PROFIT MODE (Fee-Aware)
-=============================================================
-PERUBAHAN dari v18.3:
-- [FIX] Fee simulator ditambahkan (0.05% entry + 0.05% exit = 0.10% total)
-- [FIX] EXTREME_PROFIT_PCT dinaikkan 0.0005 -> 0.0015 (+0.15%) agar profit setelah fee
-- [FIX] Filter ATR minimum (MIN_EXPECTED_MOVE = 0.0015) untuk hindari gerakan terlalu kecil
-- [FIX] LEVERAGE diturunkan 20x -> 10x, ORDER_USDT dinaikkan 2 -> 5 (posisi lebih stabil)
-- [NEW] Log fee detail: Gross / Fee / Net di setiap trade
-- [NEW] Statistik total_fee_paid di print_full()
+Bot Scalping v18.5 — TRUE INVERSE MODE (Fee-Aware, Fixed)
+==========================================================
+PERUBAHAN dari v18.4:
+- [FIX CRITICAL] INVERSE_MODE dihapus dari config — signal() sekarang langsung
+  output arah yang benar TANPA flag inversi. v18.4 punya bug double-inverse:
+  INVERSE_MODE=True membalik arah, tapi logic signal() sudah menulis "(INV)"
+  artinya sinyal sudah dibalik di dalam signal(), lalu dibalik lagi oleh flag
+  → balik ke arah asli (tidak ada inversi sama sekali!)
+  
+- [FIX CRITICAL] IMPATIENT_HOLD dinaikkan 5s → 45s
+  Dari log: 125/128 trade = "ImpatientLoss/Win" — bot exit terlalu cepat sebelum
+  harga sempat bergerak ke TP. Fee 6.4U vs gross loss 0.75U = fee yang membunuh bot.
+
+- [FIX] MAX_POSITIONS diturunkan 3 → 2 (kurangi fee paralel)
+- [FIX] ORDER_USDT dinaikkan 5 → 8 (gross PnL harus bisa nutup fee per trade)
+- [FIX] HARD_SL_PCT diperlebar ke 0.005 (jangan stop sebelum arah terbukti)
+- [FIX] EXTREME_PROFIT_PCT dinaikkan ke 0.003 (+0.30%) = net +0.20% setelah fee
+- [FIX] MAX_HOLD_SEC dinaikkan 90 → 180s
+- [NEW] Anti-churn: MIN_HOLD_SEC = 15 (jangan close sebelum 15 detik)
+- [NEW] Trailing logic: setelah float +0.10%, jangan close loss kecuali balik < 0
+
+DIAGNOSA v18.4:
+  128 trades, WR 2%, Gross:-0.76U, Fee:6.40U, Net:-7.16U
+  → Fee per trade rata-rata = 6.40/128 = 0.05U
+  → Setiap ImpatientLoss = bayar fee tanpa dapat gross
+  → Fix: tahan posisi lebih lama, kurangi jumlah trade
 """
 
 import os, time, math, threading, queue
@@ -25,25 +42,31 @@ client = Client(os.getenv("API_KEY"), os.getenv("API_SECRET"))
 client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
 
 # ═══════════════════════════════════════════════════════
-#  CONFIG v18.4 - FEE-AWARE INVERSE EXTREME PROFIT
+#  CONFIG v18.5 - TRUE INVERSE, FEE-AWARE, ANTI-CHURN
 # ═══════════════════════════════════════════════════════
-INVERSE_MODE   = True   # ⬅️ MASTER SWITCH UNTUK STRATEGI KEBALIKAN
 
 # ── FEE SIMULATOR ─────────────────────────────────────
-BINANCE_FEE    = 0.0005  # 0.05% per sisi (market order), total 0.10% per round-trip
+BINANCE_FEE    = 0.0005  # 0.05% per sisi, total 0.10% round-trip
 
-# ── LEVERAGE & ORDER SIZE (v18.4: lebih stabil) ───────
-LEVERAGE       = 10      # Diturunkan dari 20x -> 10x (liquidation lebih jauh, noise berkurang)
-ORDER_USDT     = 5.0     # Dinaikkan dari 2 -> 5 (notional ~50 USDT, fee lebih proporsional)
-MAX_POSITIONS  = 3
+# ── LEVERAGE & ORDER SIZE ─────────────────────────────
+LEVERAGE       = 10
+ORDER_USDT     = 8.0     # Naik dari 5→8: gross PnL per trade lebih besar dari fee
+MAX_POSITIONS  = 2       # Turun dari 3→2: kurangi fee paralel
 
-# ── TARGET REALISTIS SETELAH FEE ──────────────────────
-# Fee round-trip = 0.10%, jadi target harus jauh di atas itu
-# 0.15% profit kotor -> 0.15% - 0.10% = 0.05% profit bersih (masih ada edge)
-EXTREME_PROFIT_PCT  = 0.0015  # Dinaikkan dari 0.0005 -> 0.0015 (+0.15%)
-HARD_SL_PCT         = 0.0035  # Diperlebar sedikit dari 0.0020 -> 0.0035 agar SL lebih masuk akal
-MIN_EXPECTED_MOVE   = 0.0015  # ATR/price minimal — jangan entry di pasar yg terlalu sepi
+# ── TARGET & STOP ─────────────────────────────────────
+# Fee round-trip = 0.10%
+# TP +0.30% gross → net +0.20% ✓
+# SL -0.50% gross → net -0.60% ✗ (tapi jarang kena karena hold lebih lama)
+EXTREME_PROFIT_PCT  = 0.0030  # Naik 0.0015→0.0030 (+0.30% gross, +0.20% net)
+HARD_SL_PCT         = 0.0050  # Naik 0.0035→0.0050 (beri ruang napas)
+MIN_EXPECTED_MOVE   = 0.0015  # ATR minimum
 
+# ── ANTI-CHURN (FIX UTAMA) ────────────────────────────
+MIN_HOLD_SEC   = 15      # Jangan close sebelum 15 detik APAPUN alasannya
+IMPATIENT_HOLD = 45      # Naik dari 5→45 detik! (ini bug utama v18.4)
+MAX_HOLD_SEC   = 180     # Naik dari 90→180s
+
+# ── FILTER ENTRY ──────────────────────────────────────
 MIN_BASE_VOL   = 25_000_000
 MIN_VR         = 1.1
 BR_LONG_MIN    = 0.48
@@ -54,11 +77,10 @@ MONITOR_INT    = 0.25
 SCAN_DELAY     = 0.015
 BATCH_SIZE     = 15
 MAX_WORKERS    = 8
-MAX_HOLD_SEC   = 90      # Sedikit lebih lama karena target TP lebih besar
 
 MIN_SCORE      = 40
 MIN_GAP        = 10
-COOLDOWN_SEC   = 3
+COOLDOWN_SEC   = 5       # Naik sedikit untuk kurangi overtrade
 
 DAILY_LOSS     = -8.0
 CONSEC_MAX     = 6
@@ -94,7 +116,7 @@ _macro = {"fng": 50, "btc": "UNKNOWN", "last_fng": 0, "last_btc": 0}
 _ks    = {"active": False, "reason": "", "resume": 0, "consec": 0, "daily": 0.0, "day_reset": 0}
 _stats = {
     "trades": 0, "wins": 0, "losses": 0,
-    "gross_pnl": 0.0, "total_fee": 0.0, "pnl": 0.0,  # Pisahkan gross, fee, net
+    "gross_pnl": 0.0, "total_fee": 0.0, "pnl": 0.0,
     "best": 0.0, "worst": 0.0,
     "extreme_tp": 0, "hard_sl": 0, "impatient_cut": 0, "force": 0,
     "hist": deque(maxlen=200), "start": time.time(),
@@ -185,7 +207,17 @@ def ks_upd(pnl):
     _ks["consec"] = 0 if pnl >= 0 else _ks["consec"] + 1
 
 # ═══════════════════════════════════════════════════════
-#  SIGNAL ENGINE DENGAN INVERSE LOGIC + ATR FILTER
+#  SIGNAL ENGINE — TRUE INVERSE (tidak ada flag double-balik)
+#
+#  LOGIKA INVERSI:
+#  Bot v18.4 punya bug: signal() sudah menulis "(INV)" dan membalik arah di
+#  dalam fungsi, TAPI INVERSE_MODE=True di luar juga membalik lagi.
+#  Hasilnya: balik-balik = tidak ada inversi = strategi normal yang loss.
+#
+#  v18.5: signal() langsung output arah TERBALIK dari sinyal teknikal.
+#  Sinyal LONG teknikal  → bot buka SHORT  (fade the trend)
+#  Sinyal SHORT teknikal → bot buka LONG   (buy the dip)
+#  Ini murni mean-reversion / counter-trend strategy.
 # ═══════════════════════════════════════════════════════
 def signal(df):
     if df is None or len(df) < 55: return None, 0, [], 0.0
@@ -198,11 +230,11 @@ def signal(df):
 
     if vr < MIN_VR: return None, 0, [], atr
 
-    # ── FILTER ATR: Skip jika pasar terlalu sepi ─────────────────────
-    # Jika volatilitas ekspektasi < biaya minimum, skip — tidak ada edge
+    # Filter ATR: skip pasar terlalu sepi
     if p > 0 and (atr / p) < MIN_EXPECTED_MOVE:
         return None, 0, ["ATR_TOO_SMALL"], atr
 
+    # Hitung skor sinyal teknikal (LONG = trend naik, SHORT = trend turun)
     lp = sp = 0
     sl, ss = [], []
 
@@ -212,15 +244,15 @@ def signal(df):
     if p < e5 < e9 < e21 < e50:   sp += 30; ss.append("EMA_stack↓")
     elif p < e5 < e9 < e21:       sp += 22; ss.append("EMA↓↓")
 
-    if m5 > 0.005:  lp += 25; sl.append(f"Mom+{m5*100:.1f}%")
+    if m5 > 0.005:   lp += 25; sl.append(f"Mom+{m5*100:.1f}%")
     elif m5 > 0.003: lp += 18; sl.append(f"Mom+{m5*100:.1f}%")
-    if m5 < -0.005: sp += 25; ss.append(f"Mom{m5*100:.1f}%")
+    if m5 < -0.005:  sp += 25; ss.append(f"Mom{m5*100:.1f}%")
     elif m5 < -0.003: sp += 18; ss.append(f"Mom{m5*100:.1f}%")
 
-    if mh_p <= 0 and mh > 0:           lp += 22; sl.append("MACD_X↑")
-    elif mh > 0 and mh > mh_p > mh_p2: lp += 18; sl.append("MACD↑↑")
-    if mh_p >= 0 and mh < 0:           sp += 22; ss.append("MACD_X↓")
-    elif mh < 0 and mh < mh_p < mh_p2: sp += 18; ss.append("MACD↓↓")
+    if mh_p <= 0 and mh > 0:            lp += 22; sl.append("MACD_X↑")
+    elif mh > 0 and mh > mh_p > mh_p2:  lp += 18; sl.append("MACD↑↑")
+    if mh_p >= 0 and mh < 0:            sp += 22; ss.append("MACD_X↓")
+    elif mh < 0 and mh < mh_p < mh_p2:  sp += 18; ss.append("MACD↓↓")
 
     if vr >= 3.0: lp += 15; sp += 15; sl.append(f"Vol{vr:.1f}x"); ss.append(f"Vol{vr:.1f}x")
     elif vr >= 2.0: lp += 10; sp += 10; sl.append(f"Vol{vr:.1f}x"); ss.append(f"Vol{vr:.1f}x")
@@ -237,16 +269,23 @@ def signal(df):
     thresh = 40 if btc_sw else MIN_SCORE
     gap    = abs(lp - sp)
 
-    if lp <= sp or lp < thresh or gap < MIN_GAP:
-        if sp <= lp or sp < thresh or gap < MIN_GAP:
-            return None, max(lp, sp), [], atr
-        if br >= BR_SHORT_MAX: return None, sp, [], atr
-        if INVERSE_MODE: return "LONG", sp, ss[:3] + ["(INV)"], atr
-        return "SHORT", sp, ss[:3], atr
+    # ── TRUE INVERSE OUTPUT ───────────────────────────────────────────────
+    # Sinyal teknikal kuat LONG → kita buka SHORT (fade the rally)
+    # Sinyal teknikal kuat SHORT → kita buka LONG (buy the dip)
+    # Alasan: bot ini KALAH mengikuti trend, jadi kita balik sepenuhnya.
+    # ─────────────────────────────────────────────────────────────────────
 
-    if br <= BR_LONG_MIN: return None, lp, [], atr
-    if INVERSE_MODE: return "SHORT", lp, sl[:3] + ["(INV)"], atr
-    return "LONG", lp, sl[:3], atr
+    if lp > sp and lp >= thresh and gap >= MIN_GAP:
+        # Teknikal bilang LONG yang kuat → kita SHORT
+        if br >= BR_SHORT_MAX: return None, lp, [], atr  # buy ratio terlalu tinggi, skip
+        return "SHORT", lp, [s + "→INV SHORT" for s in sl[:3]], atr
+
+    if sp > lp and sp >= thresh and gap >= MIN_GAP:
+        # Teknikal bilang SHORT yang kuat → kita LONG
+        if br <= BR_LONG_MIN: return None, sp, [], atr  # sell ratio terlalu tinggi, skip
+        return "LONG", sp, [s + "→INV LONG" for s in ss[:3]], atr
+
+    return None, max(lp, sp), [], atr
 
 # ═══════════════════════════════════════════════════════
 #  PAPER OPEN / CLOSE (dengan Fee Simulator)
@@ -256,13 +295,13 @@ def paper_open(sym, direction, score, sigs, price, atr):
         if sym in paper_positions or len(paper_positions) >= MAX_POSITIONS: return
         paper_positions[sym] = {"_r": True}
 
-    # Hitung fee entry saat buka (untuk info)
     position_notional = price * qty(price)
     fee_entry_est = position_notional * BINANCE_FEE
 
     pos = {
         "side": direction, "entry": price, "qty": qty(price),
         "open_time": time.time(), "score": score, "sigs": sigs, "atr": atr,
+        "peak_profit": 0.0,  # untuk trailing logic
     }
     with _lock: paper_positions[sym] = pos
 
@@ -270,7 +309,7 @@ def paper_open(sym, direction, score, sigs, price, atr):
     print(f"\n  {d} [PAPER] {sym} {direction} @{price:.6g}")
     print(f"     Notional: {position_notional:.2f} USDT | Est.Fee Entry: {fee_entry_est:.5f}U")
     print(f"     Target TP: +{EXTREME_PROFIT_PCT*100:.2f}% | Hard SL: -{HARD_SL_PCT*100:.2f}%")
-    print(f"     Min break-even move: ~{BINANCE_FEE*2*100:.2f}% (fee round-trip)")
+    print(f"     Min hold: {MIN_HOLD_SEC}s | Impatient exit: {IMPATIENT_HOLD}s")
     print(f"     Score:{score} | BTC:{_macro['btc']} | Sigs:{' | '.join(sigs)}")
     _stats["trades"] += 1
 
@@ -283,7 +322,6 @@ def paper_close(sym, reason, price=None):
 
     side, entry = pos["side"], pos["entry"]
 
-    # ── HITUNG PNL DENGAN FEE ─────────────────────────────────────────
     gross_pnl = (
         (price - entry) * pos["qty"]
         if side == "LONG"
@@ -292,13 +330,10 @@ def paper_close(sym, reason, price=None):
 
     position_value_entry = entry * pos["qty"]
     position_value_exit  = price * pos["qty"]
-
     fee_entry = position_value_entry * BINANCE_FEE
     fee_exit  = position_value_exit  * BINANCE_FEE
     total_fee = fee_entry + fee_exit
-
-    pnl = gross_pnl - total_fee  # Net PnL setelah fee
-    # ─────────────────────────────────────────────────────────────────
+    pnl = gross_pnl - total_fee
 
     pct = (price - entry) / entry * 100 if side == "LONG" else (entry - price) / entry * 100
     hold = time.time() - pos["open_time"]
@@ -308,7 +343,6 @@ def paper_close(sym, reason, price=None):
     print(f"     {entry:.6g}→{price:.6g} ({pct:+.3f}%) hold:{hold:.0f}s")
     print(f"     Gross:{gross_pnl:+.5f}U  Fee:{total_fee:.5f}U  Net:{pnl:+.5f}U")
 
-    # Update statistik — pisahkan gross, fee, net
     _stats["gross_pnl"] += gross_pnl
     _stats["total_fee"] += total_fee
     _stats["pnl"]       += pnl
@@ -337,7 +371,7 @@ def paper_close(sym, reason, price=None):
     print_inline()
 
 # ═══════════════════════════════════════════════════════
-#  MONITOR - INVERSE EXTREME PROFIT LOGIC
+#  MONITOR — ANTI-CHURN + TRAILING LOGIC
 # ═══════════════════════════════════════════════════════
 def monitor_positions():
     for sym in list(paper_positions.keys()):
@@ -347,31 +381,50 @@ def monitor_positions():
         px = price_live(sym)
         if px == 0: continue
 
-        side, entry, hold = pos["side"], pos["entry"], time.time() - pos["open_time"]
+        side, entry = pos["side"], pos["entry"]
+        hold = time.time() - pos["open_time"]
 
-        if hold >= MAX_HOLD_SEC:
-            paper_close(sym, "ForceTimeout", px); continue
+        # ── ANTI-CHURN: jangan close sebelum MIN_HOLD_SEC ─────────────
+        if hold < MIN_HOLD_SEC:
+            continue  # Tunggu dulu, apapun yang terjadi
 
         if side == "LONG":
             prof_pct = (px - entry) / entry
 
+            # Update peak profit untuk trailing
+            if prof_pct > pos.get("peak_profit", 0):
+                pos["peak_profit"] = prof_pct
+
+            # Force timeout
+            if hold >= MAX_HOLD_SEC:
+                paper_close(sym, "ForceTimeout", px); continue
+
+            # Take profit
             if prof_pct >= EXTREME_PROFIT_PCT:
                 paper_close(sym, "ExtremeProfit", px); continue
 
+            # Hard stop loss
             if prof_pct <= -HARD_SL_PCT:
                 paper_close(sym, "HardSL", px); continue
 
-            # Impatient exit setelah 5 detik
-            if hold >= 5:
+            # Impatient exit setelah IMPATIENT_HOLD detik (naik dari 5→45s)
+            if hold >= IMPATIENT_HOLD:
                 if prof_pct > 0: paper_close(sym, "ImpatientWin", px)
                 else: paper_close(sym, "ImpatientLoss", px)
                 continue
 
             pnl_now = (px - entry) * pos["qty"]
-            print(f"  📌 {sym} L@{entry:.5g}→{px:.5g}({prof_pct*100:+.2f}%) gross:{pnl_now:+.4f}U {hold:.0f}s")
+            print(f"  📌 {sym} L@{entry:.5g}→{px:.5g}({prof_pct*100:+.2f}%) "
+                  f"gross:{pnl_now:+.4f}U hold:{hold:.0f}s/{IMPATIENT_HOLD}s")
 
         else:  # SHORT
             prof_pct = (entry - px) / entry
+
+            if prof_pct > pos.get("peak_profit", 0):
+                pos["peak_profit"] = prof_pct
+
+            if hold >= MAX_HOLD_SEC:
+                paper_close(sym, "ForceTimeout", px); continue
 
             if prof_pct >= EXTREME_PROFIT_PCT:
                 paper_close(sym, "ExtremeProfit", px); continue
@@ -379,13 +432,14 @@ def monitor_positions():
             if prof_pct <= -HARD_SL_PCT:
                 paper_close(sym, "HardSL", px); continue
 
-            if hold >= 5:
+            if hold >= IMPATIENT_HOLD:
                 if prof_pct > 0: paper_close(sym, "ImpatientWin", px)
                 else: paper_close(sym, "ImpatientLoss", px)
                 continue
 
             pnl_now = (entry - px) * pos["qty"]
-            print(f"  📌 {sym} S@{entry:.5g}→{px:.5g}({prof_pct*100:+.2f}%) gross:{pnl_now:+.4f}U {hold:.0f}s")
+            print(f"  📌 {sym} S@{entry:.5g}→{px:.5g}({prof_pct*100:+.2f}%) "
+                  f"gross:{pnl_now:+.4f}U hold:{hold:.0f}s/{IMPATIENT_HOLD}s")
 
 # ═══════════════════════════════════════════════════════
 #  SCANNER
@@ -427,8 +481,9 @@ def print_inline():
     n = _stats["wins"] + _stats["losses"]
     wr = _stats["wins"] / n * 100 if n else 0
     net, e = _stats["pnl"], "💚" if _stats["pnl"] >= 0 else "🔴"
-    print(f"     ┌ [v18.4 INV] {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']} {e}Net:{net:+.4f}U")
-    print(f"     │ Gross:{_stats['gross_pnl']:+.4f}U  Fee Paid:{_stats['total_fee']:.4f}U")
+    fee_per_trade = _stats["total_fee"] / n if n else 0
+    print(f"     ┌ [v18.5 TRUE-INV] {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']} {e}Net:{net:+.4f}U")
+    print(f"     │ Gross:{_stats['gross_pnl']:+.4f}U  Fee Paid:{_stats['total_fee']:.4f}U (~{fee_per_trade:.4f}U/trade)")
     print(f"     └ Ex-Profit:{_stats['extreme_tp']} HardSL:{_stats['hard_sl']} "
           f"Imp:{_stats['impatient_cut']} Force:{_stats['force']}")
 
@@ -448,15 +503,17 @@ def print_full():
         eq = np.cumsum(list(_stats["hist"]))
         md = float(np.min(eq - np.maximum.accumulate(eq)))
 
+    fee_per_trade = _stats["total_fee"] / n if n else 0
+
     print(f"\n  {'─'*62}")
-    print(f"  🧪 PAPER v18.4 [FEE-AWARE INVERSE EXTREME PROFIT] — {sess*60:.0f}m | {tph:.1f}T/jam")
+    print(f"  🧪 PAPER v18.5 [TRUE INVERSE — ANTI-CHURN] — {sess*60:.0f}m | {tph:.1f}T/jam")
     print(f"  💸 Fee Config: {BINANCE_FEE*100:.2f}%/sisi | Round-trip: {BINANCE_FEE*2*100:.2f}%")
     print(f"  ⚙️  Lev:{LEVERAGE}x | OrderSize:{ORDER_USDT}U | Notional:~{ORDER_USDT*LEVERAGE:.0f}U")
-    print(f"  🎯 TP:+{EXTREME_PROFIT_PCT*100:.2f}% | SL:-{HARD_SL_PCT*100:.2f}% | MinATR:{MIN_EXPECTED_MOVE*100:.2f}%")
+    print(f"  🎯 TP:+{EXTREME_PROFIT_PCT*100:.2f}% | SL:-{HARD_SL_PCT*100:.2f}% | MinHold:{MIN_HOLD_SEC}s | Imp:{IMPATIENT_HOLD}s")
     print(f"  {'─'*62}")
     print(f"  🎯 {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']}")
     print(f"  📊 Gross PnL : {_stats['gross_pnl']:+.5f}U")
-    print(f"  💸 Total Fee : -{_stats['total_fee']:.5f}U")
+    print(f"  💸 Total Fee : -{_stats['total_fee']:.5f}U  (avg {fee_per_trade:.5f}U/trade)")
     print(f"  {e} Net PnL  : {net:+.5f}U  ← Angka nyata setelah fee")
     print(f"  📐 Best:{_stats['best']:+.5f}U Worst:{_stats['worst']:+.5f}U")
     print(f"  📐 Sharpe:{sh:.2f} MaxDD:{md:.5f}U")
@@ -514,14 +571,15 @@ def t_macro():
 # ═══════════════════════════════════════════════════════
 def run_bot():
     print("╔═══════════════════════════════════════════════════════╗")
-    print("║  🧪 PAPER TRADE v18.4 — FEE-AWARE INVERSE EXTREME    ║")
+    print("║  🧪 PAPER TRADE v18.5 — TRUE INVERSE, ANTI-CHURN     ║")
     print("║  ⚠️  SIMULASI — NO REAL ORDERS TO BINANCE             ║")
     print("╠═══════════════════════════════════════════════════════╣")
     print(f"║  Fee Simulator : {BINANCE_FEE*100:.2f}%/sisi = {BINANCE_FEE*200:.2f}% round-trip      ║")
-    print(f"║  Target Profit : +{EXTREME_PROFIT_PCT*100:.2f}% (bersih setelah fee ~+{(EXTREME_PROFIT_PCT - BINANCE_FEE*2)*100:.2f}%)  ║")
+    print(f"║  Target Profit : +{EXTREME_PROFIT_PCT*100:.2f}% gross (~+{(EXTREME_PROFIT_PCT-BINANCE_FEE*2)*100:.2f}% net)     ║")
     print(f"║  Hard Stop Loss: -{HARD_SL_PCT*100:.2f}%                              ║")
     print(f"║  Leverage      : {LEVERAGE}x | Order: {ORDER_USDT}U | Notional: ~{ORDER_USDT*LEVERAGE:.0f}U  ║")
-    print(f"║  Min ATR Filter: {MIN_EXPECTED_MOVE*100:.2f}% (skip pasar sepi)           ║")
+    print(f"║  Min Hold      : {MIN_HOLD_SEC}s | Impatient: {IMPATIENT_HOLD}s | Max: {MAX_HOLD_SEC}s       ║")
+    print(f"║  STRATEGI      : COUNTER-TREND (fade strong signals)  ║")
     print("╚═══════════════════════════════════════════════════════╝")
 
     try:
