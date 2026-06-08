@@ -1,10 +1,13 @@
 """
-Bot Scalping v18.3 — DRY RUN LOG MODE (PAPER TRADING)
+Bot Scalping v18.3.1 — DRY RUN LOG MODE (PAPER TRADING)
 ====================================================
 - NORMAL MODE: Sinyal LONG dieksekusi LONG, sinyal SHORT dieksekusi SHORT.
 - EXECUTION: LOG ONLY (Tidak melakukan order ke Binance Testnet).
 - FEE CALCULATION: PnL yang ditampilkan tetap dipotong fee Taker Binance (0.05% per transaksi).
 - MODIFICATION: Menghapus total fitur Impatient Cut (Hold > 5s). TP & SL disamakan (0.2%).
+- v18.3.1 FIX: EXTREME_PROFIT_PCT dinaikkan ke 0.7% (3.5x lipat SL 0.2%)
+               agar effective R:R positif setelah fee.
+               Net TP after fee: +0.60% | Net SL after fee: -0.30% | R:R = 2:1
 """
 
 import os, time, math, threading, queue
@@ -22,7 +25,7 @@ client = Client(os.getenv("API_KEY"), os.getenv("API_SECRET"))
 client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
 
 # ═══════════════════════════════════════════════════════
-#  CONFIG v18.3 - NORMAL EXTREME PROFIT (MODIFIED)
+#  CONFIG v18.3.1 - NORMAL EXTREME PROFIT (R:R FIXED)
 # ═══════════════════════════════════════════════════════
 INVERSE_MODE   = False   
 
@@ -30,9 +33,13 @@ LEVERAGE       = 20
 ORDER_USDT     = 2.0
 MAX_POSITIONS  = 3
 
-# ── TARGET FIXED ────────────
-EXTREME_PROFIT_PCT = 0.0020  # +0.2% Take Profit (Disamakan dengan Hard SL)
-HARD_SL_PCT        = 0.0020  # -0.2% Hard Cut Loss
+# ── TARGET FIXED ────────────────────────────────────────
+# v18.3.1: TP dinaikkan 0.2% → 0.7% agar R:R positif setelah fee
+#   Gross TP  : +0.70%  →  Net TP after fee  : +0.60%
+#   Gross SL  : -0.20%  →  Net SL after fee  : -0.30%
+#   Effective R:R = 2:1  |  Break-even WR = 33%  (vs 55% aktual)
+EXTREME_PROFIT_PCT = 0.0070  # +0.7% Take Profit  ← DIUBAH dari 0.0020
+HARD_SL_PCT        = 0.0020  # -0.2% Hard Cut Loss (tidak diubah)
 FUTURES_FEE_PCT    = 0.0005  # Fee Taker Binance 0.05%
 
 MIN_BASE_VOL   = 25_000_000
@@ -265,7 +272,7 @@ def live_open(sym, direction, score, sigs, price, atr):
 
     d = "🟢" if direction == "LONG" else "🔴"
     print(f"\n  {d} [DRY RUN LOG] {sym} {direction} @{entry_price:.6g}")
-    print(f"      Target Profit: ±{EXTREME_PROFIT_PCT*100}% | Hard SL: ±{HARD_SL_PCT*100}%")
+    print(f"      Target Profit: +{EXTREME_PROFIT_PCT*100:.1f}% | Hard SL: -{HARD_SL_PCT*100:.1f}% | R:R ~2:1")
     _stats["trades"] += 1
 
 def live_close(sym, reason, price=None):
@@ -378,7 +385,7 @@ def print_inline():
     n = _stats["wins"] + _stats["losses"]
     wr = _stats["wins"] / n * 100 if n else 0
     pnl, e = _stats["pnl"], "💚" if _stats["pnl"] >= 0 else "🔴"
-    print(f"      ┌ [v18.3 DRY] {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']} {e}PnL Net:{pnl:+.4f}U")
+    print(f"      ┌ [v18.3.1 DRY] {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']} {e}PnL Net:{pnl:+.4f}U")
     print(f"      └ Ex-Profit:{_stats['extreme_tp']} HardSL:{_stats['hard_sl']}")
 
 def print_full():
@@ -397,7 +404,7 @@ def print_full():
         md = float(np.min(eq - np.maximum.accumulate(eq)))
 
     print(f"\n  {'─'*62}")
-    print(f"   🧪 DRY RUN LOG v18.3 [NORMAL EXTREME PROFIT] — {sess*60:.0f}m | {tph:.1f}T/jam")
+    print(f"   🧪 DRY RUN LOG v18.3.1 [NORMAL — TP:0.7% SL:0.2% R:R~2:1] — {sess*60:.0f}m | {tph:.1f}T/jam")
     print(f"   🎯 {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']}")
     print(f"   {e} PnL Net:{pnl:+.5f}U Best:{_stats['best']:+.5f} Worst:{_stats['worst']:+.5f}")
     print(f"   📐 Sharpe:{sh:.2f} MaxDD:{md:.5f}U")
@@ -446,7 +453,7 @@ def t_macro():
 
 def run_bot():
     print("╔═══════════════════════════════════════════════════════╗")
-    print("║   🧪 DRY RUN MODE v18.3 — NORMAL EXTREME PROFIT       ║")
+    print("║   🧪 DRY RUN MODE v18.3.1 — TP:0.7% SL:0.2% R:R~2:1 ║")
     print("║   ⚠️  NO REAL ORDERS — SIMULATION LOGGING ONLY        ║")
     print("╚═══════════════════════════════════════════════════════╝")
 
