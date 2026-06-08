@@ -1,9 +1,10 @@
 """
-Bot Scalping v18.3 — LIVE TESTNET EXTREME PROFIT MODE
+Bot Scalping v18.3 — DRY RUN LOG MODE (PAPER TRADING)
 ====================================================
 - INVERSE MODE: Sinyal LONG dieksekusi SHORT, sinyal SHORT dieksekusi LONG.
-- LIVE EXECUTION: Berjalan di Binance Futures Testnet menggunakan API.
-- FEE CALCULATION: PnL yang ditampilkan sudah dipotong fee Taker Binance (0.05% per transaksi).
+- EXECUTION: LOG ONLY (Tidak melakukan order ke Binance Testnet).
+- FEE CALCULATION: PnL yang ditampilkan tetap dipotong fee Taker Binance (0.05% per transaksi).
+- MODIFICATION: Menghapus total fitur Impatient Cut (Hold > 5s).
 """
 
 import os, time, math, threading, queue
@@ -83,7 +84,7 @@ _macro = {"fng": 50, "btc": "UNKNOWN", "last_fng": 0, "last_btc": 0}
 _ks    = {"active": False, "reason": "", "resume": 0, "consec": 0, "daily": 0.0, "day_reset": 0}
 _stats = {
     "trades": 0, "wins": 0, "losses": 0, "pnl": 0.0, "best": 0.0, "worst": 0.0,
-    "extreme_tp": 0, "hard_sl": 0, "impatient_cut": 0, "force": 0,
+    "extreme_tp": 0, "hard_sl": 0, "force": 0,
     "hist": deque(maxlen=200), "start": time.time(),
 }
 
@@ -241,7 +242,7 @@ def signal(df):
     return "LONG", lp, sl[:3], atr
 
 # ═══════════════════════════════════════════════════════
-#  LIVE TESTNET OPEN / CLOSE (MODIFIED TO REAL DEMO ACC)
+#  DRY RUN OPEN / CLOSE
 # ═══════════════════════════════════════════════════════
 def live_open(sym, direction, score, sigs, price, atr):
     with _lock:
@@ -249,13 +250,8 @@ def live_open(sym, direction, score, sigs, price, atr):
         live_positions[sym] = {"_r": True}
 
     try:
-        # Set leverage & eksekusi order market di Testnet
-        client.futures_change_leverage(symbol=sym, leverage=LEVERAGE)
-        side = Client.SIDE_BUY if direction == "LONG" else Client.SIDE_SELL
         q_val = qty(sym, price)
-        
-        order = client.futures_create_order(symbol=sym, side=side, type=Client.ORDER_TYPE_MARKET, quantity=q_val)
-        entry_price = float(order.get('avgPrice', price)) if float(order.get('avgPrice', 0)) > 0 else price
+        entry_price = price
     except Exception as e:
         print(f" ❌ Gagal Open {sym}: {e}")
         with _lock: live_positions.pop(sym, None)
@@ -268,8 +264,8 @@ def live_open(sym, direction, score, sigs, price, atr):
     with _lock: live_positions[sym] = pos
 
     d = "🟢" if direction == "LONG" else "🔴"
-    print(f"\n  {d} [LIVE TESTNET] {sym} {direction} @{entry_price:.6g}")
-    print(f"     Target Profit: ±{EXTREME_PROFIT_PCT*100}% | Hard SL: ±{HARD_SL_PCT*100}%")
+    print(f"\n  {d} [DRY RUN LOG] {sym} {direction} @{entry_price:.6g}")
+    print(f"      Target Profit: ±{EXTREME_PROFIT_PCT*100}% | Hard SL: ±{HARD_SL_PCT*100}%")
     _stats["trades"] += 1
 
 def live_close(sym, reason, price=None):
@@ -280,25 +276,17 @@ def live_close(sym, reason, price=None):
     if price is None: price = price_live(sym)
     side, entry, q_val = pos["side"], pos["entry"], pos["qty"]
 
-    try:
-        # Close order dengan arah berlawanan di Testnet
-        close_side = Client.SIDE_SELL if side == "LONG" else Client.SIDE_BUY
-        client.futures_create_order(symbol=sym, side=close_side, type=Client.ORDER_TYPE_MARKET, quantity=q_val)
-    except Exception as e:
-        print(f" ❌ Gagal Close {sym}: {e}")
-
-    # Perhitungan PnL Kotor & Potongan Fee Binance (Open + Close)
     gross_pnl = (price - entry) * q_val if side == "LONG" else (entry - price) * q_val
     open_fee = (entry * q_val) * FUTURES_FEE_PCT
     close_fee = (price * q_val) * FUTURES_FEE_PCT
     total_fee = open_fee + close_fee
-    pnl = gross_pnl - total_fee # Net PnL (Sudah dipotong Fee)
+    pnl = gross_pnl - total_fee 
     
     pct = (price - entry) / entry * 100 if side == "LONG" else (entry - price) / entry * 100
     hold = time.time() - pos["open_time"]
     e = "🟢" if pnl >= 0 else "🔴"
 
-    print(f"  {e} [LIVE TESTNET] {sym} {side} CLOSE — {reason}")
+    print(f"  {e} [DRY RUN LOG] {sym} {side} CLOSE — {reason}")
     print(f"     {entry:.6g}→{price:.6g} ({pct:+.3f}%) hold:{hold:.0f}s | PnL Bersih:{pnl:+.5f}U (Fee:{total_fee:.5f}U)")
 
     _stats["pnl"] += pnl
@@ -314,7 +302,6 @@ def live_close(sym, reason, price=None):
 
     if "ExtremeProfit" in reason: _stats["extreme_tp"] += 1
     elif "HardSL" in reason: _stats["hard_sl"] += 1
-    elif "Impatient" in reason: _stats["impatient_cut"] += 1
 
     trade_log.append({
         "sym": sym, "side": side, "entry": round(entry, 7), "exit": round(price, 7),
@@ -324,7 +311,7 @@ def live_close(sym, reason, price=None):
     print_inline()
 
 # ═══════════════════════════════════════════════════════
-#  MONITOR LOGIC (TIMEOUT REMOVED)
+#  MONITOR LOGIC (FITUR IMPATIENT CUT TELAH DIHAPUS)
 # ═══════════════════════════════════════════════════════
 def monitor_positions():
     for sym in list(live_positions.keys()):
@@ -342,12 +329,8 @@ def monitor_positions():
                 live_close(sym, "ExtremeProfit", px); continue
             if prof_pct <= -HARD_SL_PCT:
                 live_close(sym, "HardSL", px); continue
-            if hold >= 5:
-                if prof_pct > 0: live_close(sym, "ImpatientWin", px)
-                else: live_close(sym, "ImpatientLoss", px)
-                continue
             pnl_now = ((px - entry) * pos["qty"]) - (((entry * pos["qty"]) * FUTURES_FEE_PCT) + ((px * pos["qty"]) * FUTURES_FEE_PCT))
-            print(f"   📌 {sym} L@{entry:.5g}→{px:.5g}({prof_pct*100:+.2f}%) {pnl_now:+.4f}U {hold:.0f}s [EXTREME MODE]")
+            print(f"   📌 {sym} L@{entry:.5g}→{px:.5g}({prof_pct*100:+.2f}%) {pnl_now:+.4f}U {hold:.0f}s [DRY RUN]")
 
         else: # SHORT
             prof_pct = (entry - px) / entry
@@ -355,12 +338,8 @@ def monitor_positions():
                 live_close(sym, "ExtremeProfit", px); continue
             if prof_pct <= -HARD_SL_PCT:
                 live_close(sym, "HardSL", px); continue
-            if hold >= 5:
-                if prof_pct > 0: live_close(sym, "ImpatientWin", px)
-                else: live_close(sym, "ImpatientLoss", px)
-                continue
             pnl_now = ((entry - px) * pos["qty"]) - (((entry * pos["qty"]) * FUTURES_FEE_PCT) + ((px * pos["qty"]) * FUTURES_FEE_PCT))
-            print(f"   📌 {sym} S@{entry:.5g}→{px:.5g}({prof_pct*100:+.2f}%) {pnl_now:+.4f}U {hold:.0f}s [EXTREME MODE]")
+            print(f"   📌 {sym} S@{entry:.5g}→{px:.5g}({prof_pct*100:+.2f}%) {pnl_now:+.4f}U {hold:.0f}s [DRY RUN]")
 
 # ═══════════════════════════════════════════════════════
 #  SCANNER & THREAD ENGINE
@@ -399,8 +378,8 @@ def print_inline():
     n = _stats["wins"] + _stats["losses"]
     wr = _stats["wins"] / n * 100 if n else 0
     pnl, e = _stats["pnl"], "💚" if _stats["pnl"] >= 0 else "🔴"
-    print(f"     ┌ [v18.3 LIVE] {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']} {e}PnL Net:{pnl:+.4f}U")
-    print(f"     └ Ex-Profit:{_stats['extreme_tp']} HardSL:{_stats['hard_sl']} Imp-Cut:{_stats['impatient_cut']}")
+    print(f"      ┌ [v18.3 DRY] {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']} {e}PnL Net:{pnl:+.4f}U")
+    print(f"      └ Ex-Profit:{_stats['extreme_tp']} HardSL:{_stats['hard_sl']}")
 
 def print_full():
     n = _stats["wins"] + _stats["losses"]
@@ -418,16 +397,16 @@ def print_full():
         md = float(np.min(eq - np.maximum.accumulate(eq)))
 
     print(f"\n  {'─'*62}")
-    print(f"  🧪 LIVE TESTNET v18.3 [INVERSE EXTREME PROFIT] — {sess*60:.0f}m | {tph:.1f}T/jam")
-    print(f"  🎯 {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']}")
-    print(f"  {e} PnL Net:{pnl:+.5f}U Best:{_stats['best']:+.5f} Worst:{_stats['worst']:+.5f}")
-    print(f"  📐 Sharpe:{sh:.2f} MaxDD:{md:.5f}U")
-    print(f"  KS: consec={_ks['consec']} daily={_ks['daily']:+.4f} | BTC:{_macro['btc']}")
+    print(f"   🧪 DRY RUN LOG v18.3 [INVERSE EXTREME PROFIT] — {sess*60:.0f}m | {tph:.1f}T/jam")
+    print(f"   🎯 {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']}")
+    print(f"   {e} PnL Net:{pnl:+.5f}U Best:{_stats['best']:+.5f} Worst:{_stats['worst']:+.5f}")
+    print(f"   📐 Sharpe:{sh:.2f} MaxDD:{md:.5f}U")
+    print(f"   KS: consec={_ks['consec']} daily={_ks['daily']:+.4f} | BTC:{_macro['btc']}")
     if trade_log:
-        print(f"  📋 Last 5:")
+        print(f"   📋 Last 5:")
         for t in trade_log[-5:]:
             em = "🟢" if t["pnl"] > 0 else "🔴"
-            print(f"     {em} {t['sym']:<14} {t['side']} {t['pnl']:+.5f}U {t['hold']}s — {t['reason']}")
+            print(f"      {em} {t['sym']:<14} {t['side']} {t['pnl']:+.5f}U {t['hold']}s — {t['reason']}")
     print(f"  {'─'*62}")
 
 def t_monitor():
@@ -467,11 +446,8 @@ def t_macro():
 
 def run_bot():
     print("╔═══════════════════════════════════════════════════════╗")
-    print("║  🧪 LIVE TRADE v18.3 — INVERSE EXTREME PROFIT        ║")
-    print("║  ⚠️  REAL ORDERS TRADING ON BINANCE FUTURES TESTNET    ║")
-    print("╠═══════════════════════════════════════════════════════╣")
-    print(f"║  Target Profit : +{EXTREME_PROFIT_PCT*100}% | Hard SL: -{HARD_SL_PCT*100}%       ║")
-    print(f"║  Margin        : {ORDER_USDT} USDT | Max Positions: {MAX_POSITIONS}          ║")
+    print("║   🧪 DRY RUN MODE v18.3 — INVERSE EXTREME PROFIT     ║")
+    print("║   ⚠️  NO REAL ORDERS — SIMULATION LOGGING ONLY       ║")
     print("╚═══════════════════════════════════════════════════════╝")
 
     try:
