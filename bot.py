@@ -1,13 +1,10 @@
 """
-Bot Scalping v18.3.1 — DRY RUN LOG MODE (PAPER TRADING)
+Bot Scalping v18.3.1-INV — DRY RUN LOG MODE (PAPER TRADING)
 ====================================================
-- NORMAL MODE: Sinyal LONG dieksekusi LONG, sinyal SHORT dieksekusi SHORT.
-- EXECUTION: LOG ONLY (Tidak melakukan order ke Binance Testnet).
-- FEE CALCULATION: PnL yang ditampilkan tetap dipotong fee Taker Binance (0.05% per transaksi).
-- MODIFICATION: Menghapus total fitur Impatient Cut (Hold > 5s). TP & SL disamakan (0.2%).
-- v18.3.1 FIX: EXTREME_PROFIT_PCT dinaikkan ke 0.7% (3.5x lipat SL 0.2%)
-               agar effective R:R positif setelah fee.
-               Net TP after fee: +0.60% | Net SL after fee: -0.30% | R:R = 2:1
+- INVERSE MODE FIXED: Sinyal LONG → eksekusi SHORT, sinyal SHORT → eksekusi LONG.
+- Bug fix: filter br (buy ratio) tidak lagi memblokir sinyal sebelum inversi.
+- FEE CALCULATION: PnL yang ditampilkan tetap dipotong fee Taker Binance (0.05%).
+- TP: 0.7% | SL: 0.2% | R:R ~2:1
 """
 
 import os, time, math, threading, queue
@@ -25,25 +22,18 @@ client = Client(os.getenv("API_KEY"), os.getenv("API_SECRET"))
 client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
 
 # ═══════════════════════════════════════════════════════
-#  CONFIG v18.3.1 - NORMAL EXTREME PROFIT (R:R FIXED)
+#  CONFIG v18.3.1-INV
 # ═══════════════════════════════════════════════════════
-INVERSE_MODE   = False   
-
 LEVERAGE       = 20
 ORDER_USDT     = 2.0
 MAX_POSITIONS  = 3
 
-# ── TARGET FIXED ────────────────────────────────────────
-# v18.3.1: TP dinaikkan 0.2% → 0.7% agar R:R positif setelah fee
-#   Gross TP  : +0.70%  →  Net TP after fee  : +0.60%
-#   Gross SL  : -0.20%  →  Net SL after fee  : -0.30%
-#   Effective R:R = 2:1  |  Break-even WR = 33%  (vs 55% aktual)
-EXTREME_PROFIT_PCT = 0.0070  # +0.7% Take Profit  ← DIUBAH dari 0.0020
-HARD_SL_PCT        = 0.0020  # -0.2% Hard Cut Loss (tidak diubah)
+EXTREME_PROFIT_PCT = 0.0070  # +0.7% Take Profit
+HARD_SL_PCT        = 0.0020  # -0.2% Hard Cut Loss
 FUTURES_FEE_PCT    = 0.0005  # Fee Taker Binance 0.05%
 
 MIN_BASE_VOL   = 25_000_000
-MIN_VR         = 1.1    
+MIN_VR         = 1.1
 BR_LONG_MIN    = 0.48
 BR_SHORT_MAX   = 0.52
 
@@ -112,7 +102,7 @@ def get_precision(symbol):
     except: pass
     return 2
 
-def qty(symbol, price): 
+def qty(symbol, price):
     raw_qty = (ORDER_USDT * LEVERAGE) / price
     prec = get_precision(symbol)
     return round(raw_qty, prec)
@@ -196,7 +186,17 @@ def ks_upd(pnl):
     _ks["daily"] += pnl
     _ks["consec"] = 0 if pnl >= 0 else _ks["consec"] + 1
 
+# ═══════════════════════════════════════════════════════
+#  SIGNAL — PURE (tanpa inversi di sini)
+#  Return raw direction berdasarkan indikator murni.
+#  Inversi dilakukan di luar fungsi ini.
+# ═══════════════════════════════════════════════════════
 def signal(df):
+    """
+    Mengembalikan (raw_direction, score, reasons, atr).
+    raw_direction = "LONG" atau "SHORT" berdasarkan indikator asli.
+    Inversi diterapkan di scan_one() setelah fungsi ini.
+    """
     if df is None or len(df) < 55: return None, 0, [], 0.0
     row, prev, prev2 = df.iloc[-2], df.iloc[-3], df.iloc[-4]
     p, e5, e9, e21, e50 = row["close"], row["e5"], row["e9"], row["e21"], row["e50"]
@@ -208,45 +208,49 @@ def signal(df):
     lp = sp = 0
     sl, ss = [], []
 
+    # EMA stack
     if p > e5 > e9 > e21 > e50:   lp += 30; sl.append("EMA_stack↑")
     elif p > e5 > e9 > e21:       lp += 22; sl.append("EMA↑↑")
     if p < e5 < e9 < e21 < e50:   sp += 30; ss.append("EMA_stack↓")
     elif p < e5 < e9 < e21:       sp += 22; ss.append("EMA↓↓")
 
-    if m5 > 0.005:  lp += 25; sl.append(f"Mom+{m5*100:.1f}%")
+    # Momentum
+    if m5 > 0.005:   lp += 25; sl.append(f"Mom+{m5*100:.1f}%")
     elif m5 > 0.003: lp += 18; sl.append(f"Mom+{m5*100:.1f}%")
-    if m5 < -0.005: sp += 25; ss.append(f"Mom{m5*100:.1f}%")
-    elif m5 < -0.003: sp += 18; ss.append(f"Mom{m5*100:.1f}%")
+    if m5 < -0.005:  sp += 25; ss.append(f"Mom{m5*100:.1f}%")
+    elif m5 < -0.003:sp += 18; ss.append(f"Mom{m5*100:.1f}%")
 
-    if mh_p <= 0 and mh > 0:           lp += 22; sl.append("MACD_X↑")
-    elif mh > 0 and mh > mh_p > mh_p2: lp += 18; sl.append("MACD↑↑")
-    if mh_p >= 0 and mh < 0:           sp += 22; ss.append("MACD_X↓")
-    elif mh < 0 and mh < mh_p < mh_p2: sp += 18; ss.append("MACD↓↓")
+    # MACD
+    if mh_p <= 0 and mh > 0:            lp += 22; sl.append("MACD_X↑")
+    elif mh > 0 and mh > mh_p > mh_p2:  lp += 18; sl.append("MACD↑↑")
+    if mh_p >= 0 and mh < 0:            sp += 22; ss.append("MACD_X↓")
+    elif mh < 0 and mh < mh_p < mh_p2:  sp += 18; ss.append("MACD↓↓")
 
-    if vr >= 3.0: lp += 15; sp += 15; sl.append(f"Vol{vr:.1f}x"); ss.append(f"Vol{vr:.1f}x")
+    # Volume
+    if vr >= 3.0:   lp += 15; sp += 15; sl.append(f"Vol{vr:.1f}x"); ss.append(f"Vol{vr:.1f}x")
     elif vr >= 2.0: lp += 10; sp += 10; sl.append(f"Vol{vr:.1f}x"); ss.append(f"Vol{vr:.1f}x")
 
-    if br > 0.65:  lp += 18; sl.append(f"Buy{br:.0%}")
-    if br < 0.35:  sp += 18; ss.append(f"Sell{1-br:.0%}")
+    # Buy ratio
+    if br > 0.65: lp += 18; sl.append(f"Buy{br:.0%}")
+    if br < 0.35: sp += 18; ss.append(f"Sell{1-br:.0%}")
 
-    if rsi > 75: lp = int(lp * 0.4); sp += 20; ss.append(f"RSI_OB{rsi:.0f}")
+    # RSI extreme
+    if rsi > 75:   lp = int(lp * 0.4); sp += 20; ss.append(f"RSI_OB{rsi:.0f}")
     elif rsi < 25: sp = int(sp * 0.4); lp += 20; sl.append(f"RSI_OS{rsi:.0f}")
 
+    # ADX
     if adx > 35: lp += 8; sp += 8; sl.append(f"ADX{adx:.0f}"); ss.append(f"ADX{adx:.0f}")
 
     btc_sw = btc in ("SIDEWAYS", "UNKNOWN")
     thresh = 40 if btc_sw else MIN_SCORE
     gap    = abs(lp - sp)
 
-    if lp <= sp or lp < thresh or gap < MIN_GAP:
-        if sp <= lp or sp < thresh or gap < MIN_GAP: return None, max(lp, sp), [], atr
-        if br >= BR_SHORT_MAX: return None, sp, [], atr  
-        if INVERSE_MODE: return "LONG", sp, ss[:3] + ["(INV)"], atr
+    # ── Tentukan pemenang murni tanpa filter br ──────────────
+    if lp > sp and lp >= thresh and gap >= MIN_GAP:
+        return "LONG", lp, sl[:3], atr
+    if sp > lp and sp >= thresh and gap >= MIN_GAP:
         return "SHORT", sp, ss[:3], atr
-
-    if br <= BR_LONG_MIN: return None, lp, [], atr  
-    if INVERSE_MODE: return "SHORT", lp, sl[:3] + ["(INV)"], atr
-    return "LONG", lp, sl[:3], atr
+    return None, max(lp, sp), [], atr
 
 # ═══════════════════════════════════════════════════════
 #  DRY RUN OPEN / CLOSE
@@ -284,14 +288,14 @@ def live_close(sym, reason, price=None):
     side, entry, q_val = pos["side"], pos["entry"], pos["qty"]
 
     gross_pnl = (price - entry) * q_val if side == "LONG" else (entry - price) * q_val
-    open_fee = (entry * q_val) * FUTURES_FEE_PCT
-    close_fee = (price * q_val) * FUTURES_FEE_PCT
-    total_fee = open_fee + close_fee
-    pnl = gross_pnl - total_fee 
-    
-    pct = (price - entry) / entry * 100 if side == "LONG" else (entry - price) / entry * 100
+    open_fee   = (entry * q_val) * FUTURES_FEE_PCT
+    close_fee  = (price * q_val) * FUTURES_FEE_PCT
+    total_fee  = open_fee + close_fee
+    pnl        = gross_pnl - total_fee
+
+    pct  = (price - entry) / entry * 100 if side == "LONG" else (entry - price) / entry * 100
     hold = time.time() - pos["open_time"]
-    e = "🟢" if pnl >= 0 else "🔴"
+    e    = "🟢" if pnl >= 0 else "🔴"
 
     print(f"  {e} [DRY RUN LOG] {sym} {side} CLOSE — {reason}")
     print(f"     {entry:.6g}→{price:.6g} ({pct:+.3f}%) hold:{hold:.0f}s | PnL Bersih:{pnl:+.5f}U (Fee:{total_fee:.5f}U)")
@@ -339,7 +343,7 @@ def monitor_positions():
             pnl_now = ((px - entry) * pos["qty"]) - (((entry * pos["qty"]) * FUTURES_FEE_PCT) + ((px * pos["qty"]) * FUTURES_FEE_PCT))
             print(f"   📌 {sym} L@{entry:.5g}→{px:.5g}({prof_pct*100:+.2f}%) {pnl_now:+.4f}U {hold:.0f}s [DRY RUN]")
 
-        else: # SHORT
+        else:  # SHORT
             prof_pct = (entry - px) / entry
             if prof_pct >= EXTREME_PROFIT_PCT:
                 live_close(sym, "ExtremeProfit", px); continue
@@ -351,6 +355,12 @@ def monitor_positions():
 # ═══════════════════════════════════════════════════════
 #  SCANNER & THREAD ENGINE
 # ═══════════════════════════════════════════════════════
+def _invert(direction):
+    """Balik arah: LONG → SHORT, SHORT → LONG."""
+    if direction == "LONG":  return "SHORT"
+    if direction == "SHORT": return "LONG"
+    return None
+
 def scan_one(sym):
     try:
         time.sleep(SCAN_DELAY)
@@ -360,11 +370,17 @@ def scan_one(sym):
         df = run_ta(ohlcv(sym, Client.KLINE_INTERVAL_5MINUTE, 100).copy())
         px, atr = df["close"].iloc[-2], df["atr"].iloc[-2]
         if px == 0 or atr / px > 0.03: return None
-        dir_, sc, sigs, atr_val = signal(df)
-        if dir_ is None or len(sigs) < 1: return None
+
+        raw_dir, sc, sigs, atr_val = signal(df)
+        if raw_dir is None or len(sigs) < 1: return None
+
+        # ── INVERSI: eksekusi kebalikan dari sinyal ──────────
+        exec_dir = _invert(raw_dir)
+        sigs_inv = [s + "(INV)" for s in sigs]
+
         px_live = price_live(sym)
         if px_live == 0: return None
-        return (sym, dir_, sc, sigs, px_live, atr_val)
+        return (sym, exec_dir, sc, sigs_inv, px_live, atr_val)
     except: return None
 
 def scan_batch(syms):
@@ -385,7 +401,7 @@ def print_inline():
     n = _stats["wins"] + _stats["losses"]
     wr = _stats["wins"] / n * 100 if n else 0
     pnl, e = _stats["pnl"], "💚" if _stats["pnl"] >= 0 else "🔴"
-    print(f"      ┌ [v18.3.1 DRY] {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']} {e}PnL Net:{pnl:+.4f}U")
+    print(f"      ┌ [v18.3.1-INV] {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']} {e}PnL Net:{pnl:+.4f}U")
     print(f"      └ Ex-Profit:{_stats['extreme_tp']} HardSL:{_stats['hard_sl']}")
 
 def print_full():
@@ -393,10 +409,10 @@ def print_full():
     wr = _stats["wins"] / n * 100 if n else 0
     pnl, sess = _stats["pnl"], (time.time() - _stats["start"]) / 3600
     tph, e = n / sess if sess > 0 else 0, "💚" if pnl >= 0 else "🔴"
-    
+
     sh = md = 0.0
     if len(_stats["hist"]) >= 5:
-        a = np.array(list(_stats["hist"]))
+        a  = np.array(list(_stats["hist"]))
         sd = float(np.std(a))
         sh = float(np.mean(a)) / sd if sd > 0 else 0.0
     if len(_stats["hist"]) >= 2:
@@ -404,7 +420,7 @@ def print_full():
         md = float(np.min(eq - np.maximum.accumulate(eq)))
 
     print(f"\n  {'─'*62}")
-    print(f"   🧪 DRY RUN LOG v18.3.1 [NORMAL — TP:0.7% SL:0.2% R:R~2:1] — {sess*60:.0f}m | {tph:.1f}T/jam")
+    print(f"   🧪 DRY RUN LOG v18.3.1-INV [INVERSE — TP:0.7% SL:0.2% R:R~2:1] — {sess*60:.0f}m | {tph:.1f}T/jam")
     print(f"   🎯 {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']}")
     print(f"   {e} PnL Net:{pnl:+.5f}U Best:{_stats['best']:+.5f} Worst:{_stats['worst']:+.5f}")
     print(f"   📐 Sharpe:{sh:.2f} MaxDD:{md:.5f}U")
@@ -430,9 +446,9 @@ def t_rescan(syms):
             time.sleep(0.3)
             slots = MAX_POSITIONS - len(live_positions)
             if slots <= 0 or ks_check()[0]: continue
-            hot = [s for s in _hot_syms if s not in live_positions]
+            hot  = [s for s in _hot_syms if s not in live_positions]
             rest = [s for s in syms if s not in live_positions and s not in hot]
-            res = scan_batch((hot + rest)[:25])
+            res  = scan_batch((hot + rest)[:25])
             if res:
                 for r in sorted(res, key=lambda x: x[2], reverse=True)[:slots]:
                     if len(live_positions) >= MAX_POSITIONS: break
@@ -452,19 +468,21 @@ def t_macro():
         time.sleep(5)
 
 def run_bot():
-    print("╔═══════════════════════════════════════════════════════╗")
-    print("║   🧪 DRY RUN MODE v18.3.1 — TP:0.7% SL:0.2% R:R~2:1 ║")
-    print("║   ⚠️  NO REAL ORDERS — SIMULATION LOGGING ONLY        ║")
-    print("╚═══════════════════════════════════════════════════════╝")
+    print("╔═══════════════════════════════════════════════════════════╗")
+    print("║  🧪 DRY RUN v18.3.1-INV — SINYAL DIBALIK (ANTI-SINYAL)  ║")
+    print("║  LONG signal → eksekusi SHORT | SHORT signal → eksekusi LONG ║")
+    print("║  TP:0.7% SL:0.2% R:R~2:1 | NO REAL ORDERS               ║")
+    print("╚═══════════════════════════════════════════════════════════╝")
 
     try:
         valid = {s["symbol"] for s in client.futures_exchange_info()["symbols"] if s["status"] == "TRADING"}
-        syms = list(dict.fromkeys([s for s in SYMBOLS if s in valid]))
-    except: syms = list(dict.fromkeys(SYMBOLS))
+        syms  = list(dict.fromkeys([s for s in SYMBOLS if s in valid]))
+    except:
+        syms = list(dict.fromkeys(SYMBOLS))
 
     threading.Thread(target=t_monitor, daemon=True).start()
     threading.Thread(target=t_rescan, args=(syms,), daemon=True).start()
-    threading.Thread(target=t_macro, daemon=True).start()
+    threading.Thread(target=t_macro,  daemon=True).start()
 
     time.sleep(4); tickers_all()
     cycle = scan_idx = 0
@@ -479,11 +497,11 @@ def run_bot():
         if (k := ks_check())[0]: print(f"  🚨 KS:{k[1]}"); time.sleep(SCAN_INTERVAL); continue
 
         if slots > 0:
-            mv = top_movers(syms, 20)
-            mv = [s for s in mv if s not in live_positions]
-            bs = scan_idx * BATCH_SIZE
+            mv  = top_movers(syms, 20)
+            mv  = [s for s in mv if s not in live_positions]
+            bs  = scan_idx * BATCH_SIZE
             reg = [s for s in syms[bs:bs+BATCH_SIZE] if s not in live_positions and s not in mv]
-            scan_idx = (scan_idx + 1) % n_bat
+            scan_idx  = (scan_idx + 1) % n_bat
             scan_list = mv[:15] + reg[:10]
 
             try: res = scan_batch(scan_list)
@@ -503,7 +521,8 @@ def run_bot():
                     r2.sort(key=lambda x: x[2], reverse=True)
                     sym, d, sc, sg, px, atr = r2[0]
                     live_open(sym, d, sc, sg, px, atr)
-        else: print(f"  ✅ Full ({MAX_POSITIONS}/{MAX_POSITIONS})")
+        else:
+            print(f"  ✅ Full ({MAX_POSITIONS}/{MAX_POSITIONS})")
 
         if cycle % 20 == 0: print_full()
         time.sleep(SCAN_INTERVAL)
