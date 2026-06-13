@@ -1,10 +1,11 @@
 """
-Bot Scalping v18.3.3 — DRY RUN LOG MODE (PAPER TRADING)
+Bot Scalping v18.3.4 — DRY RUN LOG MODE (PAPER TRADING)
 ====================================================
 - R:R 1:4 — TP: 0.4% | SL: 0.1%
 - Inverse mode AKTIF: Analisa LONG -> Dieksekusi SHORT, Analisa SHORT -> Dieksekusi LONG
 - Trailing stop DIHAPUS
 - Timeout DIHAPUS
+- FITUR BARU: Reverse After SL (Otomatis membalik posisi jika kena Hard SL, max 1x reverse)
 """
 
 import os, time, math, threading, queue
@@ -22,7 +23,7 @@ client = Client(os.getenv("API_KEY"), os.getenv("API_SECRET"))
 client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
 
 # ═══════════════════════════════════════════════════════
-#  CONFIG v18.3.3
+#  CONFIG v18.3.4
 # ═══════════════════════════════════════════════════════
 LEVERAGE       = 20
 ORDER_USDT     = 2.0
@@ -163,7 +164,7 @@ def btc_trend():
         if p > e5 > e9 > e21 and m5 > 0.001: return "BULL"
         if p < e5 < e9 < e21 and m5 < -0.001: return "BEAR"
         if p > e9 > e21: return "MILD_BULL"
-        if p < e9 < e21: return "MILD_BEAR"
+        if p < e9 > e21: return "MILD_BEAR"
         return "SIDEWAYS"
     except: return "UNKNOWN"
 
@@ -243,7 +244,7 @@ def signal(df):
 # ═══════════════════════════════════════════════════════
 #  DRY RUN OPEN / CLOSE
 # ═══════════════════════════════════════════════════════
-def live_open(sym, direction, score, sigs, price, atr):
+def live_open(sym, direction, score, sigs, price, atr, is_reverse=False):
     with _lock:
         if sym in live_positions or len(live_positions) >= MAX_POSITIONS: return
         live_positions[sym] = {"_r": True}
@@ -259,11 +260,13 @@ def live_open(sym, direction, score, sigs, price, atr):
     pos = {
         "side": direction, "entry": entry_price, "qty": q_val,
         "open_time": time.time(), "score": score, "sigs": sigs, "atr": atr,
+        "is_reversed": is_reverse # Menandai kalau ini adalah posisi hasil reverse
     }
     with _lock: live_positions[sym] = pos
 
     d = "🟢" if direction == "LONG" else "🔴"
-    print(f"\n  {d} [DRY RUN LOG] {sym} {direction} @{entry_price:.6g}")
+    tag = "[REVERSE RUN LOG]" if is_reverse else "[DRY RUN LOG]"
+    print(f"\n  {d} {tag} {sym} {direction} @{entry_price:.6g}")
     print(f"      Target Profit: +{EXTREME_PROFIT_PCT*100:.1f}% | Hard SL: -{HARD_SL_PCT*100:.1f}%")
     _stats["trades"] += 1
 
@@ -310,7 +313,7 @@ def live_close(sym, reason, price=None):
     print_inline()
 
 # ═══════════════════════════════════════════════════════
-#  MONITOR LOGIC
+#  MONITOR LOGIC (DIPERBARUI DENGAN REVERSE SL)
 # ═══════════════════════════════════════════════════════
 def monitor_positions():
     for sym in list(live_positions.keys()):
@@ -321,13 +324,18 @@ def monitor_positions():
         if px == 0: continue
 
         side, entry, hold = pos["side"], pos["entry"], time.time() - pos["open_time"]
+        is_rev = pos.get("is_reversed", False)
 
         if side == "LONG":
             prof_pct = (px - entry) / entry
             if prof_pct >= EXTREME_PROFIT_PCT:
                 live_close(sym, "ExtremeProfit", px); continue
             if prof_pct <= -HARD_SL_PCT:
-                live_close(sym, "HardSL", px); continue
+                live_close(sym, "HardSL", px)
+                # TRIGGER REVERSE AFTER SL
+                if not is_rev:
+                    live_open(sym, "SHORT", 999, ["REVERSE_SL"], px, pos["atr"], is_reverse=True)
+                continue
             pnl_now = ((px - entry) * pos["qty"]) - (((entry * pos["qty"]) * FUTURES_FEE_PCT) + ((px * pos["qty"]) * FUTURES_FEE_PCT))
             print(f"   📌 {sym} L@{entry:.5g}→{px:.5g}({prof_pct*100:+.2f}%) {pnl_now:+.4f}U {hold:.0f}s [DRY RUN]")
 
@@ -336,7 +344,11 @@ def monitor_positions():
             if prof_pct >= EXTREME_PROFIT_PCT:
                 live_close(sym, "ExtremeProfit", px); continue
             if prof_pct <= -HARD_SL_PCT:
-                live_close(sym, "HardSL", px); continue
+                live_close(sym, "HardSL", px)
+                # TRIGGER REVERSE AFTER SL
+                if not is_rev:
+                    live_open(sym, "LONG", 999, ["REVERSE_SL"], px, pos["atr"], is_reverse=True)
+                continue
             pnl_now = ((entry - px) * pos["qty"]) - (((entry * pos["qty"]) * FUTURES_FEE_PCT) + ((px * pos["qty"]) * FUTURES_FEE_PCT))
             print(f"   📌 {sym} S@{entry:.5g}→{px:.5g}({prof_pct*100:+.2f}%) {pnl_now:+.4f}U {hold:.0f}s [DRY RUN]")
 
@@ -379,7 +391,7 @@ def print_inline():
     n = _stats["wins"] + _stats["losses"]
     wr = _stats["wins"] / n * 100 if n else 0
     pnl, e = _stats["pnl"], "💚" if _stats["pnl"] >= 0 else "🔴"
-    print(f"      ┌ [v18.3.3] {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']} {e}PnL Net:{pnl:+.4f}U")
+    print(f"      ┌ [v18.3.4] {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']} {e}PnL Net:{pnl:+.4f}U")
     print(f"      └ Ex-Profit:{_stats['extreme_tp']} HardSL:{_stats['hard_sl']}")
 
 def print_full():
@@ -398,7 +410,7 @@ def print_full():
         md = float(np.min(eq - np.maximum.accumulate(eq)))
 
     print(f"\n  {'─'*62}")
-    print(f"   🧪 DRY RUN LOG v18.3.3 [TP:0.4% SL:0.1%] — {sess*60:.0f}m | {tph:.1f}T/jam")
+    print(f"   🧪 DRY RUN LOG v18.3.4 [TP:0.4% SL:0.1%] — {sess*60:.0f}m | {tph:.1f}T/jam")
     print(f"   🎯 {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']}")
     print(f"   {e} PnL Net:{pnl:+.5f}U Best:{_stats['best']:+.5f} Worst:{_stats['worst']:+.5f}")
     print(f"   📐 Sharpe:{sh:.2f} MaxDD:{md:.5f}U")
@@ -447,7 +459,7 @@ def t_macro():
 
 def run_bot():
     print("╔═══════════════════════════════════════════════════════════╗")
-    print("║  🧪 DRY RUN v18.3.3 — INVERSE LOGIC AKTIF                 ║")
+    print("║  🧪 DRY RUN v18.3.4 — INVERSE LOGIC + REVERSE ON SL       ║")
     print("║  TP:0.4% | SL:0.1% | NO REAL ORDERS                       ║")
     print("╚═══════════════════════════════════════════════════════════╝")
 
