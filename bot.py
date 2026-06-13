@@ -1,8 +1,8 @@
 """
-Bot Scalping v18.3.2 — DRY RUN LOG MODE (PAPER TRADING)
+Bot Scalping v18.3.3 — DRY RUN LOG MODE (PAPER TRADING)
 ====================================================
-- R:R 1:1 — TP: 0.3% | SL: 0.3%
-- Inverse mode DIHAPUS: sinyal langsung dieksekusi
+- R:R 1:4 — TP: 0.4% | SL: 0.1%
+- Inverse mode AKTIF: Analisa LONG -> Dieksekusi SHORT, Analisa SHORT -> Dieksekusi LONG
 - Trailing stop DIHAPUS
 - Timeout DIHAPUS
 """
@@ -22,14 +22,14 @@ client = Client(os.getenv("API_KEY"), os.getenv("API_SECRET"))
 client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
 
 # ═══════════════════════════════════════════════════════
-#  CONFIG v18.3.2
+#  CONFIG v18.3.3
 # ═══════════════════════════════════════════════════════
 LEVERAGE       = 20
 ORDER_USDT     = 2.0
 MAX_POSITIONS  = 3
 
-EXTREME_PROFIT_PCT = 0.0040  
-HARD_SL_PCT        = 0.0015  
+EXTREME_PROFIT_PCT = 0.0040  # TP 0.4%
+HARD_SL_PCT        = 0.0010  # SL 0.1%
 FUTURES_FEE_PCT    = 0.0005  # Fee Taker Binance 0.05%
 
 MIN_BASE_VOL   = 25_000_000
@@ -187,7 +187,7 @@ def ks_upd(pnl):
     _ks["consec"] = 0 if pnl >= 0 else _ks["consec"] + 1
 
 # ═══════════════════════════════════════════════════════
-#  SIGNAL — LANGSUNG (tanpa inversi)
+#  SIGNAL — INVERSE MODE
 # ═══════════════════════════════════════════════════════
 def signal(df):
     if df is None or len(df) < 55: return None, 0, [], 0.0
@@ -238,10 +238,11 @@ def signal(df):
     thresh = 40 if btc_sw else MIN_SCORE
     gap    = abs(lp - sp)
 
+    # LOGIKA INVERSE DI SINI (LONG JADI SHORT, SHORT JADI LONG)
     if lp > sp and lp >= thresh and gap >= MIN_GAP:
-        return "LONG", lp, sl[:3], atr
+        return "SHORT", lp, sl[:3], atr  # Aslinya LONG, diubah jadi SHORT
     if sp > lp and sp >= thresh and gap >= MIN_GAP:
-        return "SHORT", sp, ss[:3], atr
+        return "LONG", sp, ss[:3], atr   # Aslinya SHORT, diubah jadi LONG
     return None, max(lp, sp), [], atr
 
 # ═══════════════════════════════════════════════════════
@@ -268,7 +269,7 @@ def live_open(sym, direction, score, sigs, price, atr):
 
     d = "🟢" if direction == "LONG" else "🔴"
     print(f"\n  {d} [DRY RUN LOG] {sym} {direction} @{entry_price:.6g}")
-    print(f"      Target Profit: +{EXTREME_PROFIT_PCT*100:.1f}% | Hard SL: -{HARD_SL_PCT*100:.1f}% | R:R 1:1")
+    print(f"      Target Profit: +{EXTREME_PROFIT_PCT*100:.1f}% | Hard SL: -{HARD_SL_PCT*100:.1f}%")
     _stats["trades"] += 1
 
 def live_close(sym, reason, price=None):
@@ -383,7 +384,7 @@ def print_inline():
     n = _stats["wins"] + _stats["losses"]
     wr = _stats["wins"] / n * 100 if n else 0
     pnl, e = _stats["pnl"], "💚" if _stats["pnl"] >= 0 else "🔴"
-    print(f"      ┌ [v18.3.2] {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']} {e}PnL Net:{pnl:+.4f}U")
+    print(f"      ┌ [v18.3.3] {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']} {e}PnL Net:{pnl:+.4f}U")
     print(f"      └ Ex-Profit:{_stats['extreme_tp']} HardSL:{_stats['hard_sl']}")
 
 def print_full():
@@ -402,7 +403,7 @@ def print_full():
         md = float(np.min(eq - np.maximum.accumulate(eq)))
 
     print(f"\n  {'─'*62}")
-    print(f"   🧪 DRY RUN LOG v18.3.2 [TP:0.3% SL:0.3% R:R 1:1] — {sess*60:.0f}m | {tph:.1f}T/jam")
+    print(f"   🧪 DRY RUN LOG v18.3.3 [TP:0.4% SL:0.1%] — {sess*60:.0f}m | {tph:.1f}T/jam")
     print(f"   🎯 {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']}")
     print(f"   {e} PnL Net:{pnl:+.5f}U Best:{_stats['best']:+.5f} Worst:{_stats['worst']:+.5f}")
     print(f"   📐 Sharpe:{sh:.2f} MaxDD:{md:.5f}U")
@@ -451,8 +452,8 @@ def t_macro():
 
 def run_bot():
     print("╔═══════════════════════════════════════════════════════════╗")
-    print("║  🧪 DRY RUN v18.3.2 — SINYAL LANGSUNG (NO INVERSE)      ║")
-    print("║  TP:0.3% | SL:0.3% | R:R 1:1 | NO REAL ORDERS           ║")
+    print("║  🧪 DRY RUN v18.3.3 — INVERSE LOGIC AKTIF                 ║")
+    print("║  TP:0.4% | SL:0.1% | NO REAL ORDERS                       ║")
     print("╚═══════════════════════════════════════════════════════════╝")
 
     try:
