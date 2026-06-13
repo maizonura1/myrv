@@ -28,8 +28,8 @@ LEVERAGE       = 20
 ORDER_USDT     = 2.0
 MAX_POSITIONS  = 3
 
-EXTREME_PROFIT_PCT = 0.0030  # +0.3% Take Profit
-HARD_SL_PCT        = 0.0030  # -0.3% Hard Stop Loss  ← R:R 1:1
+EXTREME_PROFIT_PCT = 0.0040  
+HARD_SL_PCT        = 0.0015  
 FUTURES_FEE_PCT    = 0.0005  # Fee Taker Binance 0.05%
 
 MIN_BASE_VOL   = 25_000_000
