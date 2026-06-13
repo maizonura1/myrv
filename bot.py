@@ -187,7 +187,7 @@ def ks_upd(pnl):
     _ks["consec"] = 0 if pnl >= 0 else _ks["consec"] + 1
 
 # ═══════════════════════════════════════════════════════
-#  SIGNAL — INVERSE MODE
+#  SIGNAL — NORMAL MODE (Dibalik ke arah semula)
 # ═══════════════════════════════════════════════════════
 def signal(df):
     if df is None or len(df) < 55: return None, 0, [], 0.0
@@ -219,30 +219,25 @@ def signal(df):
     if mh_p >= 0 and mh < 0:            sp += 22; ss.append("MACD_X↓")
     elif mh < 0 and mh < mh_p < mh_p2:  sp += 18; ss.append("MACD↓↓")
 
-    # Volume
+    # Volume & Ratio
     if vr >= 3.0:   lp += 15; sp += 15; sl.append(f"Vol{vr:.1f}x"); ss.append(f"Vol{vr:.1f}x")
-    elif vr >= 2.0: lp += 10; sp += 10; sl.append(f"Vol{vr:.1f}x"); ss.append(f"Vol{vr:.1f}x")
-
-    # Buy ratio
     if br > 0.65: lp += 18; sl.append(f"Buy{br:.0%}")
     if br < 0.35: sp += 18; ss.append(f"Sell{1-br:.0%}")
 
-    # RSI extreme
+    # RSI
     if rsi > 75:   lp = int(lp * 0.4); sp += 20; ss.append(f"RSI_OB{rsi:.0f}")
     elif rsi < 25: sp = int(sp * 0.4); lp += 20; sl.append(f"RSI_OS{rsi:.0f}")
-
-    # ADX
-    if adx > 35: lp += 8; sp += 8; sl.append(f"ADX{adx:.0f}"); ss.append(f"ADX{adx:.0f}")
 
     btc_sw = btc in ("SIDEWAYS", "UNKNOWN")
     thresh = 40 if btc_sw else MIN_SCORE
     gap    = abs(lp - sp)
 
-    # LOGIKA INVERSE DI SINI (LONG JADI SHORT, SHORT JADI LONG)
+    # LOGIKA NORMAL (LONG KEMBALI LONG, SHORT KEMBALI SHORT)
     if lp > sp and lp >= thresh and gap >= MIN_GAP:
-        return "SHORT", lp, sl[:3], atr  # Aslinya LONG, diubah jadi SHORT
+        return "LONG", lp, sl[:3], atr
     if sp > lp and sp >= thresh and gap >= MIN_GAP:
-        return "LONG", sp, ss[:3], atr   # Aslinya SHORT, diubah jadi LONG
+        return "SHORT", sp, ss[:3], atr
+    
     return None, max(lp, sp), [], atr
 
 # ═══════════════════════════════════════════════════════
