@@ -1,11 +1,10 @@
 """
-Bot Scalping v18.3.4 — DRY RUN LOG MODE (PAPER TRADING)
+Bot Scalping v19.0 — DRY RUN LOG MODE (PAPER TRADING)
 ====================================================
-- R:R 1:4 — TP: 0.4% | SL: 0.1%
-- Inverse mode AKTIF: Analisa LONG -> Dieksekusi SHORT, Analisa SHORT -> Dieksekusi LONG
-- Trailing stop DIHAPUS
-- Timeout DIHAPUS
-- FITUR BARU: Reverse After SL (Otomatis membalik posisi jika kena Hard SL, max 1x reverse)
+- LOGIKA BARU: Fade the Climax (Counter-Trend / Mean Reversion)
+- R:R 1:2 — TP: 0.6% | SL: 0.3%
+- SELF-LEARNING: Bot menyesuaikan bobot sinyal secara otomatis berdasarkan histori Win/Loss
+- Fitur "Reverse After SL" DIHAPUS (mencegah double-loss saat whipsaw)
 """
 
 import os, time, math, threading, queue
@@ -23,14 +22,14 @@ client = Client(os.getenv("API_KEY"), os.getenv("API_SECRET"))
 client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
 
 # ═══════════════════════════════════════════════════════
-#  CONFIG v18.3.4
+#  CONFIG v19.0 (R:R Diperbarui)
 # ═══════════════════════════════════════════════════════
 LEVERAGE       = 20
 ORDER_USDT     = 2.0
 MAX_POSITIONS  = 3
 
-EXTREME_PROFIT_PCT = 0.0040  # TP 0.4%
-HARD_SL_PCT        = 0.0010  # SL 0.1%
+EXTREME_PROFIT_PCT = 0.0060  # TP 0.6%
+HARD_SL_PCT        = 0.0030  # SL 0.3%
 FUTURES_FEE_PCT    = 0.0005  # Fee Taker Binance 0.05%
 
 MIN_BASE_VOL   = 25_000_000
@@ -85,6 +84,9 @@ _stats = {
     "extreme_tp": 0, "hard_sl": 0, "force": 0,
     "hist": deque(maxlen=200), "start": time.time(),
 }
+
+# Menyimpan histori performa sinyal (Self-Learning)
+_signal_weights = {}
 
 # ═══════════════════════════════════════════════════════
 #  BINANCE UTILS
@@ -188,63 +190,88 @@ def ks_upd(pnl):
     _ks["consec"] = 0 if pnl >= 0 else _ks["consec"] + 1
 
 # ═══════════════════════════════════════════════════════
-#  SIGNAL — NORMAL MODE (Dibalik ke arah semula)
+#  SELF-LEARNING WEIGHT SYSTEM
+# ═══════════════════════════════════════════════════════
+def get_weight(sig):
+    """Sistem Pembelajaran: Mengembalikan bobot berdasarkan histori win/loss"""
+    s = _signal_weights.get(sig, {"w": 0, "l": 0})
+    total = s["w"] + s["l"]
+    if total < 5: return 1.0 # Butuh minimal 5 trade sebelum mulai menyesuaikan bobot
+    
+    win_rate = s["w"] / total
+    # Jika win rate tinggi (>50%), bobot naik maksimal 1.5x
+    # Jika win rate buruk (<50%), bobot turun hingga 0.2x (menghindari sinyal jebakan)
+    return max(0.2, min(1.5, win_rate * 2))
+
+# ═══════════════════════════════════════════════════════
+#  SIGNAL — FADE THE CLIMAX
 # ═══════════════════════════════════════════════════════
 def signal(df):
     if df is None or len(df) < 55: return None, 0, [], 0.0
     row, prev, prev2 = df.iloc[-2], df.iloc[-3], df.iloc[-4]
     p, e5, e9, e21, e50 = row["close"], row["e5"], row["e9"], row["e21"], row["e50"]
     rsi, mh, mh_p, mh_p2 = row["rsi"], row["mh"], prev["mh"], prev2["mh"]
-    vr, br, m5, body, atr, adx = row["vr"], row["br"], row["m5"], row["br2"], row["atr"], row["adx"]
-    btc = _macro["btc"]
+    vr, br, m5 = row["vr"], row["br"], row["m5"]
+    atr = row["atr"]
 
     if vr < MIN_VR: return None, 0, [], atr
-    lp = sp = 0
-    sl, ss = [], []
 
-    # EMA stack
-    if p > e5 > e9 > e21 > e50:   lp += 30; sl.append("EMA_stack↑")
-    elif p > e5 > e9 > e21:       lp += 22; sl.append("EMA↑↑")
-    if p < e5 < e9 < e21 < e50:   sp += 30; ss.append("EMA_stack↓")
-    elif p < e5 < e9 < e21:       sp += 22; ss.append("EMA↓↓")
+    fomo_score = panic_score = 0
+    fomo_sigs, panic_sigs = [], []
 
-    # Momentum
-    if m5 > 0.005:   lp += 25; sl.append(f"Mom+{m5*100:.1f}%")
-    elif m5 > 0.003: lp += 18; sl.append(f"Mom+{m5*100:.1f}%")
-    if m5 < -0.005:  sp += 25; ss.append(f"Mom{m5*100:.1f}%")
-    elif m5 < -0.003:sp += 18; ss.append(f"Mom{m5*100:.1f}%")
+    def add_score(score_type, sig_name, base_val):
+        nonlocal fomo_score, panic_score
+        w = get_weight(sig_name)
+        val = int(base_val * w) # Kalikan dengan bobot historis
+        if score_type == "fomo":
+            fomo_score += val; fomo_sigs.append(f"{sig_name}({w:.1f}x)")
+        else:
+            panic_score += val; panic_sigs.append(f"{sig_name}({w:.1f}x)")
 
-    # MACD
-    if mh_p <= 0 and mh > 0:            lp += 22; sl.append("MACD_X↑")
-    elif mh > 0 and mh > mh_p > mh_p2:  lp += 18; sl.append("MACD↑↑")
-    if mh_p >= 0 and mh < 0:            sp += 22; ss.append("MACD_X↓")
-    elif mh < 0 and mh < mh_p < mh_p2:  sp += 18; ss.append("MACD↓↓")
+    # 1. EMA Stack Terlambat -> Pucuk/Dasar sudah terbentuk
+    if p > e5 > e9 > e21 > e50: add_score("fomo", "EMA_FOMO", 30)
+    if p < e5 < e9 < e21 < e50: add_score("panic", "EMA_PANIC", 30)
 
-    # Volume & Ratio
-    if vr >= 3.0:   lp += 15; sp += 15; sl.append(f"Vol{vr:.1f}x"); ss.append(f"Vol{vr:.1f}x")
-    if br > 0.65: lp += 18; sl.append(f"Buy{br:.0%}")
-    if br < 0.35: sp += 18; ss.append(f"Sell{1-br:.0%}")
+    # 2. Momentum Kehabisan Tenaga
+    if m5 > 0.005: add_score("fomo", "Mom_FOMO", 25)
+    if m5 < -0.005: add_score("panic", "Mom_PANIC", 25)
 
-    # RSI
-    if rsi > 75:   lp = int(lp * 0.4); sp += 20; ss.append(f"RSI_OB{rsi:.0f}")
-    elif rsi < 25: sp = int(sp * 0.4); lp += 20; sl.append(f"RSI_OS{rsi:.0f}")
+    # 3. MACD Crossover Terlambat
+    if mh > 0 and mh_p <= 0: add_score("fomo", "MACD_FOMO", 22)
+    if mh < 0 and mh_p >= 0: add_score("panic", "MACD_PANIC", 22)
 
-    btc_sw = btc in ("SIDEWAYS", "UNKNOWN")
+    # 4. Volume Spike -> Tanda Distribusi/Akumulasi Institusi
+    if vr >= 2.5:
+        add_score("fomo", "Vol_Climax_UP", 20)
+        add_score("panic", "Vol_Climax_DN", 20)
+
+    # 5. Buy Ratio -> Melawan sentimen mayoritas retail
+    if br > 0.65: add_score("fomo", "Retail_Buy_Trap", 20)
+    if br < 0.35: add_score("panic", "Retail_Sell_Trap", 20)
+
+    # 6. RSI Konfirmasi OB/OS
+    if rsi > 70: add_score("fomo", "RSI_OB", 20)
+    if rsi < 30: add_score("panic", "RSI_OS", 20)
+
+    btc_sw = _macro["btc"] in ("SIDEWAYS", "UNKNOWN")
     thresh = 40 if btc_sw else MIN_SCORE
-    gap    = abs(lp - sp)
+    gap    = abs(fomo_score - panic_score)
 
-    # LOGIKA NORMAL (LONG KEMBALI LONG, SHORT KEMBALI SHORT)
-    if lp > sp and lp >= thresh and gap >= MIN_GAP:
-        return "LONG", lp, sl[:3], atr
-    if sp > lp and sp >= thresh and gap >= MIN_GAP:
-        return "SHORT", sp, ss[:3], atr
+    # EKSEKUSI REVERSE LOGIC
+    if fomo_score > panic_score and fomo_score >= thresh and gap >= MIN_GAP:
+        clean_sigs = [s.split('(')[0] for s in fomo_sigs[:3]]
+        return "SHORT", fomo_score, clean_sigs, atr
+
+    if panic_score > fomo_score and panic_score >= thresh and gap >= MIN_GAP:
+        clean_sigs = [s.split('(')[0] for s in panic_sigs[:3]]
+        return "LONG", panic_score, clean_sigs, atr
     
-    return None, max(lp, sp), [], atr
+    return None, max(fomo_score, panic_score), [], atr
 
 # ═══════════════════════════════════════════════════════
 #  DRY RUN OPEN / CLOSE
 # ═══════════════════════════════════════════════════════
-def live_open(sym, direction, score, sigs, price, atr, is_reverse=False):
+def live_open(sym, direction, score, sigs, price, atr):
     with _lock:
         if sym in live_positions or len(live_positions) >= MAX_POSITIONS: return
         live_positions[sym] = {"_r": True}
@@ -259,15 +286,13 @@ def live_open(sym, direction, score, sigs, price, atr, is_reverse=False):
 
     pos = {
         "side": direction, "entry": entry_price, "qty": q_val,
-        "open_time": time.time(), "score": score, "sigs": sigs, "atr": atr,
-        "is_reversed": is_reverse # Menandai kalau ini adalah posisi hasil reverse
+        "open_time": time.time(), "score": score, "sigs": sigs, "atr": atr
     }
     with _lock: live_positions[sym] = pos
 
     d = "🟢" if direction == "LONG" else "🔴"
-    tag = "[REVERSE RUN LOG]" if is_reverse else "[DRY RUN LOG]"
-    print(f"\n  {d} {tag} {sym} {direction} @{entry_price:.6g}")
-    print(f"      Target Profit: +{EXTREME_PROFIT_PCT*100:.1f}% | Hard SL: -{HARD_SL_PCT*100:.1f}%")
+    print(f"\n  {d} [NEW LOGIC] {sym} {direction} @{entry_price:.6g}")
+    print(f"      Target Profit: +{EXTREME_PROFIT_PCT*100:.2f}% | Hard SL: -{HARD_SL_PCT*100:.2f}%")
     _stats["trades"] += 1
 
 def live_close(sym, reason, price=None):
@@ -288,12 +313,23 @@ def live_close(sym, reason, price=None):
     hold = time.time() - pos["open_time"]
     e    = "🟢" if pnl >= 0 else "🔴"
 
-    print(f"  {e} [DRY RUN LOG] {sym} {side} CLOSE — {reason}")
-    print(f"     {entry:.6g}→{price:.6g} ({pct:+.3f}%) hold:{hold:.0f}s | PnL Bersih:{pnl:+.5f}U (Fee:{total_fee:.5f}U)")
+    print(f"  {e} [CLOSED] {sym} {side} — {reason}")
+    print(f"     {entry:.6g}→{price:.6g} ({pct:+.3f}%) hold:{hold:.0f}s | PnL Bersih:{pnl:+.5f}U")
 
     _stats["pnl"] += pnl
     _stats["hist"].append(pnl)
     ks_upd(pnl)
+
+    # === SISTEM SELF-LEARNING ===
+    is_win = pnl >= 0
+    for sig in pos.get("sigs", []):
+        if sig not in _signal_weights:
+            _signal_weights[sig] = {"w": 0, "l": 0}
+        if is_win:
+            _signal_weights[sig]["w"] += 1
+        else:
+            _signal_weights[sig]["l"] += 1
+    # ============================
 
     if pnl >= 0:
         _stats["wins"] += 1
@@ -313,7 +349,7 @@ def live_close(sym, reason, price=None):
     print_inline()
 
 # ═══════════════════════════════════════════════════════
-#  MONITOR LOGIC (DIPERBARUI DENGAN REVERSE SL)
+#  MONITOR LOGIC
 # ═══════════════════════════════════════════════════════
 def monitor_positions():
     for sym in list(live_positions.keys()):
@@ -324,18 +360,14 @@ def monitor_positions():
         if px == 0: continue
 
         side, entry, hold = pos["side"], pos["entry"], time.time() - pos["open_time"]
-        is_rev = pos.get("is_reversed", False)
 
         if side == "LONG":
             prof_pct = (px - entry) / entry
             if prof_pct >= EXTREME_PROFIT_PCT:
                 live_close(sym, "ExtremeProfit", px); continue
             if prof_pct <= -HARD_SL_PCT:
-                live_close(sym, "HardSL", px)
-                # TRIGGER REVERSE AFTER SL
-                if not is_rev:
-                    live_open(sym, "SHORT", 999, ["REVERSE_SL"], px, pos["atr"], is_reverse=True)
-                continue
+                live_close(sym, "HardSL", px); continue
+            
             pnl_now = ((px - entry) * pos["qty"]) - (((entry * pos["qty"]) * FUTURES_FEE_PCT) + ((px * pos["qty"]) * FUTURES_FEE_PCT))
             print(f"   📌 {sym} L@{entry:.5g}→{px:.5g}({prof_pct*100:+.2f}%) {pnl_now:+.4f}U {hold:.0f}s [DRY RUN]")
 
@@ -344,11 +376,8 @@ def monitor_positions():
             if prof_pct >= EXTREME_PROFIT_PCT:
                 live_close(sym, "ExtremeProfit", px); continue
             if prof_pct <= -HARD_SL_PCT:
-                live_close(sym, "HardSL", px)
-                # TRIGGER REVERSE AFTER SL
-                if not is_rev:
-                    live_open(sym, "LONG", 999, ["REVERSE_SL"], px, pos["atr"], is_reverse=True)
-                continue
+                live_close(sym, "HardSL", px); continue
+            
             pnl_now = ((entry - px) * pos["qty"]) - (((entry * pos["qty"]) * FUTURES_FEE_PCT) + ((px * pos["qty"]) * FUTURES_FEE_PCT))
             print(f"   📌 {sym} S@{entry:.5g}→{px:.5g}({prof_pct*100:+.2f}%) {pnl_now:+.4f}U {hold:.0f}s [DRY RUN]")
 
@@ -391,7 +420,7 @@ def print_inline():
     n = _stats["wins"] + _stats["losses"]
     wr = _stats["wins"] / n * 100 if n else 0
     pnl, e = _stats["pnl"], "💚" if _stats["pnl"] >= 0 else "🔴"
-    print(f"      ┌ [v18.3.4] {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']} {e}PnL Net:{pnl:+.4f}U")
+    print(f"      ┌ [v19.0] {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']} {e}PnL Net:{pnl:+.4f}U")
     print(f"      └ Ex-Profit:{_stats['extreme_tp']} HardSL:{_stats['hard_sl']}")
 
 def print_full():
@@ -410,10 +439,19 @@ def print_full():
         md = float(np.min(eq - np.maximum.accumulate(eq)))
 
     print(f"\n  {'─'*62}")
-    print(f"   🧪 DRY RUN LOG v18.3.4 [TP:0.4% SL:0.1%] — {sess*60:.0f}m | {tph:.1f}T/jam")
+    print(f"   🧪 DRY RUN LOG v19.0 [TP:0.6% SL:0.3%] — {sess*60:.0f}m | {tph:.1f}T/jam")
     print(f"   🎯 {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']}")
     print(f"   {e} PnL Net:{pnl:+.5f}U Best:{_stats['best']:+.5f} Worst:{_stats['worst']:+.5f}")
-    print(f"   📐 Sharpe:{sh:.2f} MaxDD:{md:.5f}U")
+    
+    # Menampilkan Status Self-Learning
+    if _signal_weights:
+        print(f"   🧠 Top Signals Learned:")
+        sorted_sigs = sorted(_signal_weights.items(), key=lambda x: (x[1]['w']/(x[1]['w']+x[1]['l']) if x[1]['w']+x[1]['l']>0 else 0), reverse=True)[:3]
+        for sig, data in sorted_sigs:
+            total = data['w'] + data['l']
+            sig_wr = (data['w']/total)*100 if total > 0 else 0
+            print(f"      - {sig}: {sig_wr:.0f}% Win ({data['w']}W/{data['l']}L)")
+
     print(f"   KS: consec={_ks['consec']} daily={_ks['daily']:+.4f} | BTC:{_macro['btc']}")
     if trade_log:
         print(f"   📋 Last 5:")
@@ -459,8 +497,8 @@ def t_macro():
 
 def run_bot():
     print("╔═══════════════════════════════════════════════════════════╗")
-    print("║  🧪 DRY RUN v18.3.4 — INVERSE LOGIC + REVERSE ON SL       ║")
-    print("║  TP:0.4% | SL:0.1% | NO REAL ORDERS                       ║")
+    print("║  🧪 DRY RUN v19.0 — FADE THE CLIMAX & SELF-LEARNING       ║")
+    print("║  TP:0.6% | SL:0.3% | NO REAL ORDERS                       ║")
     print("╚═══════════════════════════════════════════════════════════╝")
 
     try:
