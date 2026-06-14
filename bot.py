@@ -49,6 +49,20 @@ MIN_RR_RATIO = 1.8     # Minimum reward:risk (TP distance / SL distance)
 MAX_SL_PCT = 0.015     # Maksimum SL dalam persen (1.5%) untuk proteksi
 MAX_TP_PCT = 0.04      # Maksimum TP dalam persen (4%)
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  SYMBOLS (sama seperti original)
+# ═══════════════════════════════════════════════════════════════════════════
+SYMBOLS = [
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+    "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "TRXUSDT", "DOTUSDT",
+    "LINKUSDT", "MATICUSDT", "LTCUSDT", "ATOMUSDT", "UNIUSDT",
+    "NEARUSDT", "APTUSDT", "ARBUSDT", "OPUSDT", "INJUSDT",
+    "SUIUSDT", "SEIUSDT", "FETUSDT", "WLDUSDT", "AAVEUSDT",
+    "ORDIUSDT", "TONUSDT", "1000PEPEUSDT", "WIFUSDT", "JUPUSDT",
+    "FTMUSDT", "SANDUSDT", "MANAUSDT", "GALAUSDT", "APEUSDT",
+    "CRVUSDT", "1000SHIBUSDT", "COMPUSDT", "MKRUSDT", "SNXUSDT",
+]
+SYMBOLS = list(dict.fromkeys(SYMBOLS))
 # Scanning
 SCAN_INTERVAL = 0.2
 MONITOR_INT = 0.05
